@@ -1,0 +1,7 @@
+# Normalise line endings in the repo, but never hand Windows an LF batch file:
+# cmd.exe mis-parses labels and `goto` when a .bat uses LF endings.
+* text=auto
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh text eol=lf
+*.mjs text eol=lf
