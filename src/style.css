@@ -41,6 +41,15 @@ h1 em { color: var(--orange); font-style: italic; }
 .intro-note { border-left: 1px solid var(--line); padding-left: 18px; color: var(--muted); display: flex; gap: 12px; font: 12px/1.5 Arial, sans-serif; flex: none; }
 .intro-note span, .step { color: var(--orange); font: 700 11px Arial, sans-serif; }
 
+/* ---------- section switch ---------- */
+.mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+.mode-tab { border: 1px solid var(--line); background: transparent; text-align: left; padding: 15px 17px; display: flex; flex-direction: column; gap: 5px; color: var(--muted); }
+.mode-tab b { font: 600 14px Arial, sans-serif; color: var(--ink); }
+.mode-tab span { font: 11px/1.45 Arial, sans-serif; }
+.mode-tab:hover { border-color: #aabca1; }
+.mode-tab.selected { background: var(--sage); border-color: #aabca1; }
+.mode-tab.selected b { color: #37552f; }
+
 /* ---------- panels ---------- */
 .workspace { display: grid; grid-template-columns: 1.25fr .75fr; gap: 20px; align-items: start; }
 .panel { border: 1px solid var(--line); background: rgba(255, 253, 248, .72); padding: 30px; }
@@ -87,6 +96,8 @@ h2 { font-size: 25px; font-weight: 500; letter-spacing: -.03em; }
 .chip { border: 1px solid var(--line); background: transparent; color: var(--muted); padding: 7px 11px; font: 11px Arial, sans-serif; }
 .chip:hover { border-color: #aabca1; }
 .chip.selected { background: var(--sage); border-color: #aabca1; color: #37552f; font-weight: 700; }
+.chip.unavailable { opacity: .4; cursor: not-allowed; text-decoration: line-through; }
+.chip.unavailable:hover { border-color: var(--line); }
 .mode-copy { color: var(--muted); font: 11px/1.5 Arial, sans-serif; margin: 8px 0 0; }
 .swatch-row { display: flex; gap: 6px; align-items: center; }
 .swatch { width: 30px; height: 30px; border: 1px solid var(--line); padding: 0; }
@@ -107,6 +118,47 @@ h2 { font-size: 25px; font-weight: 500; letter-spacing: -.03em; }
 .primary-button span:last-child { font-size: 20px; line-height: 10px; }
 .hint { color: var(--muted); font: 11px Arial, sans-serif; text-align: center; margin-top: 13px; }
 .hint.error { color: #b4462a; }
+.ghost-button { border: 1px solid var(--ink); background: transparent; color: var(--ink); padding: 10px 16px; font: 700 11px Arial, sans-serif; letter-spacing: .06em; text-transform: uppercase; }
+.ghost-button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---------- AI panel ---------- */
+.text-input { width: 100%; border: 1px solid var(--line); background: var(--paper); padding: 10px 12px; font: 12px Arial, sans-serif; }
+.text-input:focus { outline: 2px solid var(--orange); outline-offset: -1px; }
+textarea.text-input { resize: vertical; }
+.connect-box { border: 1px solid var(--line); background: #fff8f1; padding: 16px; display: grid; gap: 10px; }
+.connect-fields { display: grid; gap: 8px; }
+.connect-fields input { border: 1px solid var(--line); background: var(--paper); padding: 10px 12px; font: 12px Arial, sans-serif; }
+.connect-box .ghost-button { justify-self: start; }
+.connect-box code { font-size: 11px; background: #efece3; padding: 1px 4px; }
+.count-label.connected { color: #4d7045; }
+.wide-button { width: 100%; margin-top: 10px; text-align: center; display: block; }
+.caption-list { display: grid; gap: 6px; margin-top: 10px; }
+.caption-row { display: flex; align-items: center; gap: 8px; }
+.caption-row img { width: 32px; height: 32px; object-fit: contain; background: #f0eee7; flex: none; }
+.caption-row input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--paper); padding: 7px 9px; font: 11px Arial, sans-serif; }
+.caption-row input:focus { outline: 2px solid var(--orange); outline-offset: -1px; }
+#ai-describe-connect input { width: 100%; border: 1px solid var(--line); background: var(--paper); padding: 10px 12px; font: 12px Arial, sans-serif; }
+#ai-describe-run { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.field-label em { font-style: normal; text-transform: none; letter-spacing: 0; color: #a1a59d; }
+.link-button { border: 0; background: transparent; padding: 0; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line); }
+.link-button:hover { color: var(--ink); }
+
+/* ---------- AI run progress ---------- */
+.progress { height: 5px; background: #e5e4da; overflow: hidden; }
+.progress-bar { height: 100%; width: 0; background: var(--orange); transition: width .3s ease; }
+.combo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; margin-top: 22px; }
+.combo-card { border: 1px solid var(--line); background: var(--paper); padding: 14px; }
+.combo-card-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font: 11px Arial, sans-serif; color: var(--muted); border-bottom: 1px solid #e5e4da; padding-bottom: 9px; margin-bottom: 11px; }
+.combo-card-head strong { color: var(--ink); font-weight: 600; overflow-wrap: anywhere; line-height: 1.4; }
+.angle-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr)); gap: 8px; }
+.angle-tile { display: flex; flex-direction: column; gap: 3px; font: 9px Arial, sans-serif; color: var(--muted); }
+.angle-tile img, .angle-tile-blank { width: 100%; aspect-ratio: 1; object-fit: cover; background: #e9e7df; display: block; }
+.angle-tile b { color: var(--ink); font: 600 10px Arial, sans-serif; overflow-wrap: anywhere; }
+.angle-tile.running .angle-tile-blank { background: repeating-linear-gradient(45deg, #f0d9c9, #f0d9c9 6px, #e9e7df 6px, #e9e7df 12px); }
+.angle-tile.running span { color: var(--orange); }
+.angle-tile.failed .angle-tile-blank { background: #f2d9d1; }
+.angle-tile.failed span { color: #b4462a; }
+.angle-tile.done span, .angle-tile.skipped span { color: #4d7045; }
 
 /* ---------- results ---------- */
 .result-section { border-top: 1px solid var(--line); margin-top: 84px; padding-top: 34px; }
@@ -127,6 +179,7 @@ h2 { font-size: 25px; font-weight: 500; letter-spacing: -.03em; }
 .result-foot a:hover { text-decoration: underline; }
 
 @media (max-width: 1024px) { :root { --shell: 100%; } }
+@media (max-width: 860px) { .mode-switch { grid-template-columns: 1fr; } }
 @media (max-width: 760px) {
   main { padding-top: 42px; }
   .intro { display: block; margin-bottom: 38px; }

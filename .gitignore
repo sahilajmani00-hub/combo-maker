@@ -12,6 +12,15 @@ dist
 dist-ssr
 *.local
 
+# Higgsfield API credentials written by the AI section's setup form
+.env
+
+# Default destination for AI angle-combo runs
+/ai-combos/
+
+# Points at the queue folder the browser extension is working through
+/.active-queue
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

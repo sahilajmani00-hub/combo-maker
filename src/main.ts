@@ -13,11 +13,34 @@ import {
   type RatioId,
 } from './compose.ts'
 import { createZip, type ZipEntry } from './zip.ts'
-import { comboName } from './naming.ts'
+import { comboFolder, comboName } from './naming.ts'
 import { MAX_COMBOS, buildGroups, countGroups, minimumImages, type GroupMode } from './grouping.ts'
+import { AI_BACKGROUNDS, ANGLES, DEFAULT_ANGLES, angleById, buildPrompt, type AngleId } from './angles.ts'
+import {
+  canvasToReference,
+  cancelRun,
+  describeProducts,
+  estimateRun,
+  defaultFolderName,
+  fetchConfig,
+  fetchRun,
+  revealFolder,
+  saveCredentials,
+  sendQueue,
+  saveDescribeKey,
+  startRun,
+  toReference,
+  type AiConfig,
+  type Estimate,
+  type QueueSummary,
+  type RunRequest,
+  type RunItem,
+  type RunSnapshot,
+} from './ai.ts'
 
 type Product = { id: number; file: File; url: string }
 type Result = { name: string; blob: Blob; url: string; index: number }
+type Tab = 'canvas' | 'ai'
 
 const MAX_PRODUCTS = 60
 
@@ -27,6 +50,9 @@ const BACKGROUNDS = [
   { id: '#f2f2f2', label: 'Light grey' },
   { id: 'transparent', label: 'Transparent (PNG only)' },
 ]
+
+/** How often the AI run panel asks the launcher how far along it is. */
+const RUN_POLL_MS = 1500
 
 const state = {
   products: [] as Product[],
@@ -43,9 +69,38 @@ const state = {
   format: 'png' as 'png' | 'jpeg',
 }
 
+/** Everything the AI section owns. Combo size and mode stay shared with above. */
+const ai = {
+  config: null as AiConfig | null,
+  angles: [...DEFAULT_ANGLES] as AngleId[],
+  subject: 'earrings',
+  background: AI_BACKGROUNDS[0].id,
+  ratio: '1:1',
+  model: 'soul-reference',
+  resolution: '1080p',
+  estimate: null as Estimate | null,
+  format: 'jpeg' as 'jpeg' | 'png',
+  concurrency: 3,
+  outputRoot: '',
+  folderName: '',
+  extra: '',
+  run: null as RunSnapshot | null,
+  starting: false,
+  /** Forces the credentials form open again once a key is already saved. */
+  showConnect: false,
+  /** Product id -> one-line description, from the vision model or hand-edited. */
+  captions: {} as Record<number, string>,
+  describeModel: '',
+  describing: false,
+  queueing: false,
+  queue: null as QueueSummary | null,
+}
+
+let tab: Tab = 'canvas'
 let results: Result[] = []
 let nextId = 1
 let busy = false
+let pollTimer: ReturnType<typeof setTimeout> | null = null
 
 /** Prepared canvases are expensive; keyed by product + trim setting. */
 const prepCache = new Map<string, PreparedImage>()
@@ -62,6 +117,31 @@ function comboGroups(): Product[][] {
   return buildGroups(state.products, state.comboSize, state.mode)
 }
 
+function selectedModel() {
+  return ai.config?.models.find((model) => model.id === ai.model) ?? null
+}
+
+/** Combos x angles — what one AI run will actually cost. */
+function aiJobCount(): number {
+  return comboGroups().length * ai.angles.length
+}
+
+const sizeOptionsHtml = () =>
+  ([2, 3, 4] as ComboSize[])
+    .map((size) => `<button class="size-option ${size === state.comboSize ? 'selected' : ''}" data-size="${size}" role="radio" aria-checked="${size === state.comboSize}"><b>${size}</b><span>products</span></button>`)
+    .join('')
+
+const MODE_OPTIONS: { id: GroupMode; label: string }[] = [
+  { id: 'combinations', label: 'Every combination' },
+  { id: 'repeats', label: 'Allow repeats' },
+  { id: 'sequential', label: 'In upload order' },
+]
+
+const modeOptionsHtml = () =>
+  MODE_OPTIONS
+    .map((option) => `<button class="chip ${option.id === state.mode ? 'selected' : ''}" data-mode="${option.id}">${option.label}</button>`)
+    .join('')
+
 app.innerHTML = `
   <header class="topbar">
     <a class="brand" href="."><span class="brand-mark">CM</span><span>Combo Maker</span></a>
@@ -76,6 +156,11 @@ app.innerHTML = `
       </div>
       <div class="intro-note"><span>01</span><p>Your files stay in this browser.<br>No upload, no account, no fuss.</p></div>
     </section>
+
+    <div class="mode-switch" role="tablist" aria-label="Combo builder">
+      <button class="mode-tab selected" data-tab="canvas" role="tab" aria-selected="true"><b>Canvas combos</b><span>Arrange the real photos side by side. Offline and free.</span></button>
+      <button class="mode-tab" data-tab="ai" role="tab" aria-selected="false"><b>AI angle combos</b><span>Higgsfield re-shoots each set from several camera angles.</span></button>
+    </div>
 
     <div class="workspace">
       <section class="panel setup-panel">
@@ -148,6 +233,112 @@ app.innerHTML = `
         <button id="generate-button" class="primary-button" disabled><span id="generate-text">Generate combos</span><span>&rarr;</span></button>
         <p id="hint" class="hint"></p>
       </section>
+
+      <section class="panel ai-panel hidden">
+        <div class="panel-heading">
+          <div><span class="step">02</span><h2>Shoot with Higgsfield</h2></div>
+          <button id="ai-connection" class="count-label link-button"></button>
+        </div>
+        <p class="section-copy">Every combo is re-photographed by Higgsfield once per camera angle you tick, and saved straight into a folder of its own.</p>
+
+        <div id="ai-connect" class="connect-box">
+          <span class="field-label">Higgsfield API credentials</span>
+          <div class="connect-fields">
+            <input id="ai-key-id" type="text" placeholder="Key ID" autocomplete="off" spellcheck="false">
+            <input id="ai-key-secret" type="password" placeholder="Key secret" autocomplete="off">
+          </div>
+          <button id="ai-connect-button" class="ghost-button">Connect</button>
+          <p class="mode-copy">Create a key pair at <b>cloud.higgsfield.ai</b>. It is saved to a local <code>.env</code> file and used only by the launcher window — the browser tab never receives it.</p>
+        </div>
+
+        <div class="rule"></div>
+        <p class="section-copy">How many products should sit in one image?</p>
+        <div id="ai-size-options" class="size-options" role="radiogroup" aria-label="Combo size"></div>
+
+        <div class="field" style="margin-top:18px">
+          <span class="field-label">Which combos to build</span>
+          <div id="ai-mode-options" class="chip-row"></div>
+          <p id="ai-mode-copy" class="mode-copy"></p>
+        </div>
+
+        <div class="field">
+          <span class="field-label">Camera angles</span>
+          <div id="ai-angle-options" class="chip-row"></div>
+          <p class="mode-copy">Each angle is a separate generation, so four angles cost four times one.</p>
+        </div>
+
+        <div class="field">
+          <span class="field-label">What are these products?</span>
+          <input id="ai-subject" class="text-input" type="text" value="${escapeHtml(ai.subject)}" placeholder="earrings" spellcheck="false">
+        </div>
+        <div class="field">
+          <span class="field-label">Describe the products <em>(optional)</em></span>
+          <div id="ai-describe-connect" class="connect-box">
+            <input id="ai-or-key" type="password" placeholder="OpenRouter API key" autocomplete="off">
+            <button id="ai-or-connect" class="ghost-button">Connect</button>
+            <p class="mode-copy">A vision model names each product so the prompt can hold it steady — the difference between "keep the products unchanged" and "keep the brushed-gold hoop with a pearl drop". Key from <b>openrouter.ai</b>, stored in the same local <code>.env</code>.</p>
+          </div>
+          <div id="ai-describe-run">
+            <div id="ai-describe-models" class="chip-row"></div>
+            <button id="ai-describe-button" class="ghost-button">Describe my products</button>
+          </div>
+          <div id="ai-caption-list" class="caption-list"></div>
+        </div>
+        <div class="field">
+          <span class="field-label">Backdrop</span>
+          <div id="ai-background-options" class="chip-row"></div>
+        </div>
+        <div class="field">
+          <span class="field-label">Frame</span>
+          <div id="ai-ratio-options" class="chip-row"></div>
+        </div>
+        <div class="field">
+          <span class="field-label">Model</span>
+          <div id="ai-model-options" class="chip-row"></div>
+          <p id="ai-model-copy" class="mode-copy"></p>
+        </div>
+        <div class="field" id="ai-resolution-field">
+          <span class="field-label">Resolution</span>
+          <div id="ai-resolution-options" class="chip-row"></div>
+        </div>
+        <div class="field">
+          <span class="field-label">Save as</span>
+          <div id="ai-format-options" class="chip-row"></div>
+        </div>
+        <div class="field">
+          <span class="field-label">Anything else to tell the model</span>
+          <textarea id="ai-extra" class="text-input" rows="2" placeholder="e.g. shot on a dark walnut tray, warm gold light"></textarea>
+        </div>
+
+        <div class="rule"></div>
+
+        <div class="field">
+          <span class="field-label">Save into</span>
+          <input id="ai-output-root" class="text-input" type="text" placeholder="/Users/you/Pictures/combos" spellcheck="false">
+        </div>
+        <div class="field">
+          <span class="field-label">Master folder name</span>
+          <input id="ai-folder-name" class="text-input" type="text" spellcheck="false">
+        </div>
+        <div class="field">
+          <span class="field-label">Generate at once</span>
+          <div class="slider-row">
+            <input id="ai-concurrency" type="range" min="1" max="8" step="1" value="${ai.concurrency}">
+            <span id="ai-concurrency-value" class="slider-value">${ai.concurrency}</span>
+          </div>
+        </div>
+
+        <div class="rule"></div>
+        <div class="recipe-meta"><span>Combos</span><strong id="ai-combo-count">—</strong></div>
+        <div class="recipe-meta"><span>Angles each</span><strong id="ai-angle-count">—</strong></div>
+        <div class="recipe-meta"><span>Images to generate</span><strong id="ai-job-count">—</strong></div>
+        <div class="recipe-meta"><span>Estimated cost</span><strong id="ai-cost">—</strong></div>
+
+        <button id="ai-generate-button" class="primary-button" disabled><span id="ai-generate-text">Generate with Higgsfield</span><span>&rarr;</span></button>
+        <button id="ai-queue-button" class="ghost-button wide-button" disabled><span id="ai-queue-text">Send to extension</span></button>
+        <p class="mode-copy">Writes the reference images and prompts to a folder and hands them to the Combo Maker browser extension, so you can upload and download them yourself on higgsfield.ai. Costs nothing.</p>
+        <p id="ai-hint" class="hint"></p>
+      </section>
     </div>
 
     <section id="result-section" class="result-section hidden">
@@ -158,6 +349,23 @@ app.innerHTML = `
         </div>
       </div>
       <div id="result-grid" class="result-grid"></div>
+    </section>
+
+    <section id="ai-result-section" class="result-section hidden">
+      <div class="result-heading">
+        <div>
+          <p class="eyebrow">03 / HIGGSFIELD</p>
+          <h2 id="ai-result-title">Shooting your combos</h2>
+          <p id="ai-result-path" class="mode-copy"></p>
+        </div>
+        <div class="result-actions">
+          <button id="ai-open-folder" class="download-button ghost">Open folder</button>
+          <button id="ai-cancel" class="download-button">Stop run</button>
+        </div>
+      </div>
+      <div class="progress"><div id="ai-progress-bar" class="progress-bar"></div></div>
+      <p id="ai-progress-copy" class="hint"></p>
+      <div id="ai-run-grid" class="combo-grid"></div>
     </section>
   </main>
   <footer><span>Combo Maker</span><span>Local image composition tool</span></footer>
@@ -174,20 +382,19 @@ const hint = el<HTMLParagraphElement>('#hint')
 const resultSection = el<HTMLElement>('#result-section')
 const resultGrid = el<HTMLDivElement>('#result-grid')
 
+const aiPanel = el<HTMLElement>('.ai-panel')
+const recipePanel = el<HTMLElement>('.recipe-panel')
+const aiGenerateButton = el<HTMLButtonElement>('#ai-generate-button')
+const aiGenerateText = el<HTMLSpanElement>('#ai-generate-text')
+const aiHint = el<HTMLParagraphElement>('#ai-hint')
+const aiResultSection = el<HTMLElement>('#ai-result-section')
+const aiRunGrid = el<HTMLDivElement>('#ai-run-grid')
+
 /* ---------------- control rendering ---------------- */
 
 function renderControls() {
-  el('#size-options').innerHTML = ([2, 3, 4] as ComboSize[])
-    .map((size) => `<button class="size-option ${size === state.comboSize ? 'selected' : ''}" data-size="${size}" role="radio" aria-checked="${size === state.comboSize}"><b>${size}</b><span>products</span></button>`)
-    .join('')
-
-  el('#mode-options').innerHTML = ([
-    { id: 'combinations', label: 'Every combination' },
-    { id: 'repeats', label: 'Allow repeats' },
-    { id: 'sequential', label: 'In upload order' },
-  ] as { id: GroupMode; label: string }[])
-    .map((option) => `<button class="chip ${option.id === state.mode ? 'selected' : ''}" data-mode="${option.id}">${option.label}</button>`)
-    .join('')
+  el('#size-options').innerHTML = sizeOptionsHtml()
+  el('#mode-options').innerHTML = modeOptionsHtml()
 
   el('#mode-copy').textContent = {
     combinations: `Every unique set of ${state.comboSize} different products — each image appears in several combos.`,
@@ -279,7 +486,7 @@ function renderProducts() {
 }
 
 function renderResults() {
-  resultSection.classList.toggle('hidden', results.length === 0)
+  resultSection.classList.toggle('hidden', tab !== 'canvas' || results.length === 0)
   el('#result-title').textContent = `Your combo ${results.length === 1 ? 'image' : 'images'}`
   resultGrid.innerHTML = results
     .map((result) => `<div class="result-card">
@@ -289,9 +496,23 @@ function renderResults() {
     .join('')
 }
 
+function renderTabs() {
+  document.querySelectorAll<HTMLButtonElement>('.mode-tab').forEach((button) => {
+    const selected = button.dataset.tab === tab
+    button.classList.toggle('selected', selected)
+    button.setAttribute('aria-selected', String(selected))
+  })
+  recipePanel.classList.toggle('hidden', tab !== 'canvas')
+  aiPanel.classList.toggle('hidden', tab !== 'ai')
+}
+
 function refresh() {
+  renderTabs()
   renderProducts()
   renderControls()
+  renderAiControls()
+  renderResults()
+  renderAiRun()
 }
 
 /* ---------------- product input ---------------- */
@@ -306,8 +527,10 @@ function addFiles(files: FileList | File[]) {
   ]
   refresh()
   if (incoming.length > accepted.length) {
-    hint.className = 'hint error'
-    hint.textContent = `Only ${MAX_PRODUCTS} images fit at once — ${incoming.length - accepted.length} were skipped.`
+    const message = `Only ${MAX_PRODUCTS} images fit at once — ${incoming.length - accepted.length} were skipped.`
+    const target = tab === 'ai' ? aiHint : hint
+    target.className = 'hint error'
+    target.textContent = message
   }
 }
 
@@ -317,6 +540,7 @@ function dropProduct(id: number) {
   URL.revokeObjectURL(product.url)
   prepCache.delete(`${id}:true`)
   prepCache.delete(`${id}:false`)
+  delete ai.captions[id]
   state.products = state.products.filter((item) => item.id !== id)
   refresh()
 }
@@ -355,9 +579,16 @@ dropzone.addEventListener('drop', (event) => {
   if (event.dataTransfer?.files.length) addFiles(event.dataTransfer.files)
 })
 
+el('.mode-switch').addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-tab]')
+  if (!button) return
+  tab = button.dataset.tab as Tab
+  refresh()
+})
+
 /* ---------------- settings ---------------- */
 
-el('.recipe-panel').addEventListener('click', (event) => {
+recipePanel.addEventListener('click', (event) => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-size], button[data-mode], button[data-layout], button[data-ratio], button[data-background], button[data-format]')
   if (!button) return
   const { size, mode, layout, ratio, background, format } = button.dataset
@@ -403,6 +634,27 @@ async function preparedFor(product: Product): Promise<PreparedImage> {
   const prepared = await prepareImage(product.file, state.trim)
   prepCache.set(key, prepared)
   return prepared
+}
+
+/**
+ * Flattens one combo onto a canvas, for models that take a single reference.
+ *
+ * It uses the Canvas tab's own settings, so what that tab previews is literally
+ * what Higgsfield is handed — and a transparent background has to land on white,
+ * since a JPEG reference carries no alpha.
+ */
+async function compositeReference(group: Product[]): Promise<HTMLCanvasElement> {
+  const images = await Promise.all(group.map(preparedFor))
+  return composeCombo(images, {
+    size: state.comboSize,
+    layout: normalizeLayout(state.comboSize, state.layout),
+    ratio: state.ratio,
+    background: state.background === 'transparent' ? '#ffffff' : state.background,
+    padding: state.padding / 100,
+    gap: state.gap / 100,
+    uniformScale: state.uniformScale,
+    align: state.align,
+  })
 }
 
 function clearResults() {
@@ -482,5 +734,584 @@ el('#download-zip').addEventListener('click', async () => {
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 })
+
+/* ---------------- AI section ---------------- */
+
+/**
+ * Asks the API what one image costs under the current settings.
+ *
+ * Only the model, frame and resolution move the price, so this runs on those
+ * changes rather than on every render.
+ */
+async function refreshEstimate() {
+  const model = selectedModel()
+  if (!model?.available) {
+    ai.estimate = null
+    return
+  }
+  try {
+    ai.estimate = await estimateRun(ai.model, ai.ratio, ai.resolution)
+  } catch {
+    // A missing estimate is not worth blocking on; the count still shows.
+    ai.estimate = null
+  }
+  renderAiControls()
+}
+
+const runActive = () => ai.run !== null && (ai.run.status === 'preparing' || ai.run.status === 'running')
+
+function renderAiControls() {
+  const connected = Boolean(ai.config?.configured)
+  const connection = el<HTMLButtonElement>('#ai-connection')
+  connection.textContent = connected ? `Connected · ${ai.config?.keyId}` : 'Not connected'
+  connection.classList.toggle('connected', connected)
+  // A key exported into the environment wins over the .env file, so replacing
+  // it from here would silently do nothing. Say so rather than offering a form
+  // that cannot take effect.
+  connection.title = ai.config?.fromEnvironment
+    ? 'Set from HF_API_KEY_ID in the environment'
+    : connected ? 'Use a different key' : 'Add your Higgsfield key'
+  el('#ai-connect').classList.toggle('hidden', connected && !ai.showConnect)
+
+  el('#ai-size-options').innerHTML = sizeOptionsHtml()
+  el('#ai-mode-options').innerHTML = modeOptionsHtml()
+  el('#ai-mode-copy').textContent = {
+    combinations: `Every unique set of ${state.comboSize} different products — 10 images in sets of 3 is 120 combos.`,
+    repeats: `Same, but a product can repeat inside a combo. Works from a single image.`,
+    sequential: `Takes your images ${state.comboSize} at a time in order; anything left over is skipped.`,
+  }[state.mode]
+
+  el('#ai-angle-options').innerHTML = ANGLES
+    .map((angle) => `<button class="chip ${ai.angles.includes(angle.id) ? 'selected' : ''}" data-angle="${angle.id}" aria-pressed="${ai.angles.includes(angle.id)}">${angle.label}</button>`)
+    .join('')
+
+  el('#ai-background-options').innerHTML = AI_BACKGROUNDS
+    .map((option) => `<button class="chip ${option.id === ai.background ? 'selected' : ''}" data-ai-background="${escapeHtml(option.id)}">${option.label}</button>`)
+    .join('')
+
+  const models = ai.config?.models ?? []
+  const model = selectedModel()
+
+  el('#ai-model-options').innerHTML = models
+    .map((entry) => `<button class="chip ${entry.id === ai.model ? 'selected' : ''} ${entry.available ? '' : 'unavailable'}" data-ai-model="${entry.id}" ${entry.available ? '' : 'disabled'} title="${escapeHtml(entry.unavailableReason ?? entry.note)}">${escapeHtml(entry.label)}</button>`)
+    .join('')
+  el('#ai-model-copy').textContent = model
+    ? model.available ? model.note : `${model.label}: ${model.unavailableReason}`
+    : ''
+
+  const resolutions = model?.resolutions ?? null
+  el('#ai-resolution-field').classList.toggle('hidden', !resolutions)
+  if (resolutions) {
+    if (!resolutions.includes(ai.resolution)) ai.resolution = resolutions[0]
+    el('#ai-resolution-options').innerHTML = resolutions
+      .map((id) => `<button class="chip ${id === ai.resolution ? 'selected' : ''}" data-ai-resolution="${id}">${id}</button>`)
+      .join('')
+  }
+
+  // Each model publishes the ratios its API accepts, and rejects any other.
+  const ratios = model?.aspectRatios ?? ['1:1']
+  if (!ratios.includes(ai.ratio)) ai.ratio = ratios[0]
+  el('#ai-ratio-options').innerHTML = ratios
+    .map((id) => `<button class="chip ${id === ai.ratio ? 'selected' : ''}" data-ai-ratio="${id}">${id}</button>`)
+    .join('')
+
+  el('#ai-format-options').innerHTML = (['jpeg', 'png'] as const)
+    .map((format) => `<button class="chip ${format === ai.format ? 'selected' : ''}" data-ai-format="${format}">${format === 'png' ? 'PNG' : 'JPG'}</button>`)
+    .join('')
+
+  renderDescribe()
+
+  const groups = comboGroups()
+  const jobs = aiJobCount()
+  const maxJobs = ai.config?.maxJobs ?? 600
+  el('#ai-combo-count').textContent = groups.length ? String(groups.length) : '—'
+  el('#ai-angle-count').textContent = ai.angles.length ? String(ai.angles.length) : '—'
+  el('#ai-job-count').textContent = jobs ? String(jobs) : '—'
+  // Priced per generation by the API, so the run total is just a multiplication.
+  el('#ai-cost').textContent = ai.estimate && jobs
+    ? `${(ai.estimate.credits * jobs).toLocaleString(undefined, { maximumFractionDigits: 0 })} credits · $${(ai.estimate.usd * jobs).toFixed(2)}`
+    : '—'
+
+  const outputRoot = el<HTMLInputElement>('#ai-output-root')
+  if (document.activeElement !== outputRoot) {
+    outputRoot.placeholder = ai.config?.defaultOutputRoot ?? 'ai-combos'
+    outputRoot.value = ai.outputRoot
+  }
+  const folderName = el<HTMLInputElement>('#ai-folder-name')
+  if (document.activeElement !== folderName) folderName.value = ai.folderName || defaultFolderName(state.comboSize)
+
+  const blocked = !connected || !groups.length || !ai.angles.length || jobs > maxJobs || !model?.available
+  aiGenerateButton.disabled = ai.starting || runActive() || blocked
+  // The queue needs no credentials and spends nothing, so it only wants combos.
+  el<HTMLButtonElement>('#ai-queue-button').disabled =
+    ai.starting || ai.queueing || !groups.length || !ai.angles.length
+
+  aiHint.className = 'hint'
+  if (ai.starting) {
+    aiHint.textContent = 'Preparing your reference photos...'
+  } else if (runActive()) {
+    aiHint.textContent = 'A run is already going. Watch it below, or stop it to start another.'
+  } else if (!connected) {
+    aiHint.textContent = 'Connect a Higgsfield key above to start generating.'
+  } else if (model && !model.available) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = `${model.label} is not available on your account — pick another model.`
+  } else if (!state.products.length) {
+    aiHint.textContent = `Add at least ${plural(minimumImages(state.comboSize, state.mode), 'product image')} to continue.`
+  } else if (!groups.length) {
+    aiHint.textContent = `Add more images to complete a set of ${state.comboSize}.`
+  } else if (!ai.angles.length) {
+    aiHint.textContent = 'Tick at least one camera angle.'
+  } else if (jobs > maxJobs) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = `${jobs} images is over the ${maxJobs} per-run limit — pick fewer angles or a smaller set.`
+  } else {
+    const via = model?.references === 'one'
+      ? ' Each combo is composited on canvas first, exactly as the Canvas tab shows it, then re-shot.'
+      : ''
+    aiHint.textContent = `${plural(groups.length, 'combo')} × ${plural(ai.angles.length, 'angle')} = ${jobs} images, each one billed to your Higgsfield account.${via}`
+  }
+}
+
+function renderDescribe() {
+  const describe = ai.config?.describe
+  const ready = Boolean(describe?.configured)
+  el('#ai-describe-connect').classList.toggle('hidden', ready)
+  el('#ai-describe-run').classList.toggle('hidden', !ready)
+
+  if (describe && !ai.describeModel) ai.describeModel = describe.defaultModel
+  el('#ai-describe-models').innerHTML = (describe?.models ?? [])
+    .map((model) => `<button class="chip ${model.id === ai.describeModel ? 'selected' : ''}" data-describe-model="${model.id}">${escapeHtml(model.label)}</button>`)
+    .join('')
+
+  const button = el<HTMLButtonElement>('#ai-describe-button')
+  button.disabled = ai.describing || !state.products.length
+  button.textContent = ai.describing
+    ? 'Looking at your photos...'
+    : `Describe ${state.products.length ? plural(state.products.length, 'product') : 'my products'}`
+
+  // Rewriting the list while someone is typing in it would steal the caret.
+  const list = el('#ai-caption-list')
+  if (list.contains(document.activeElement)) return
+  const described = state.products.filter((product) => ai.captions[product.id] !== undefined)
+  list.innerHTML = described
+    .map((product) => `<label class="caption-row">
+      <img src="${product.url}" alt="">
+      <input type="text" data-caption="${product.id}" value="${escapeHtml(ai.captions[product.id] ?? '')}" placeholder="Not described" spellcheck="false">
+    </label>`)
+    .join('')
+}
+
+const STATUS_LABEL: Record<RunItem['status'], string> = {
+  pending: 'Queued',
+  running: 'Shooting',
+  done: 'Saved',
+  failed: 'Failed',
+  skipped: 'Already there',
+}
+
+function renderAiRun() {
+  const run = ai.run
+  aiResultSection.classList.toggle('hidden', tab !== 'ai' || !run)
+  if (!run) return
+
+  const settled = run.done + run.failed + run.skipped
+  const percent = run.total ? Math.round((settled / run.total) * 100) : 0
+  el<HTMLDivElement>('#ai-progress-bar').style.width = `${percent}%`
+  el('#ai-result-path').textContent = run.directory
+  el('#ai-result-title').textContent = {
+    preparing: 'Uploading your product photos',
+    running: 'Shooting your combos',
+    finished: 'Your combo shoot is done',
+    cancelled: 'Run stopped',
+    failed: 'Run failed',
+  }[run.status]
+
+  const parts = [`${settled} of ${run.total}`]
+  if (run.failed) parts.push(`${run.failed} failed`)
+  if (run.skipped) parts.push(`${run.skipped} already on disk`)
+  const copy = el('#ai-progress-copy')
+  copy.className = run.status === 'failed' || run.failed ? 'hint error' : 'hint'
+  copy.textContent = run.error ?? run.warning ?? `${parts.join(' · ')}. Closing this tab will not stop the run.`
+
+  el<HTMLButtonElement>('#ai-cancel').classList.toggle('hidden', !runActive())
+
+  // Grouped by combo, because that is exactly how the folders come out.
+  const byCombo = new Map<string, RunItem[]>()
+  for (const item of run.items) {
+    const list = byCombo.get(item.combo) ?? []
+    list.push(item)
+    byCombo.set(item.combo, list)
+  }
+
+  aiRunGrid.innerHTML = [...byCombo]
+    .map(([combo, items]) => {
+      const finished = items.filter((item) => item.status === 'done' || item.status === 'skipped').length
+      const tiles = items
+        .map((item) => `<div class="angle-tile ${item.status}" title="${escapeHtml(item.error ?? STATUS_LABEL[item.status])}">
+          ${item.previewUrl ? `<img src="${escapeHtml(item.previewUrl)}" alt="${escapeHtml(`${combo}, ${item.angle}`)}" loading="lazy">` : '<span class="angle-tile-blank"></span>'}
+          <b>${escapeHtml(item.angle)}</b><span>${STATUS_LABEL[item.status]}</span>
+        </div>`)
+        .join('')
+      return `<div class="combo-card">
+        <div class="combo-card-head"><strong>${escapeHtml(combo)}</strong><span>${finished}/${items.length}</span></div>
+        <div class="angle-tiles">${tiles}</div>
+      </div>`
+    })
+    .join('')
+}
+
+aiPanel.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-size], button[data-mode], button[data-angle], button[data-ai-background], button[data-ai-ratio], button[data-ai-resolution], button[data-ai-model], button[data-ai-format], button[data-describe-model]')
+  if (!button) return
+  const { size, mode, angle } = button.dataset
+  if (size) state.comboSize = Number(size) as ComboSize
+  if (mode) state.mode = mode as GroupMode
+  if (angle) {
+    // Angles are a multi-select: ticking is what multiplies the run.
+    const id = angle as AngleId
+    ai.angles = ai.angles.includes(id) ? ai.angles.filter((entry) => entry !== id) : [...ai.angles, id]
+  }
+  if (button.dataset.aiBackground) ai.background = button.dataset.aiBackground
+  if (button.dataset.aiRatio) ai.ratio = button.dataset.aiRatio
+  if (button.dataset.aiResolution) ai.resolution = button.dataset.aiResolution
+  if (button.dataset.aiModel) ai.model = button.dataset.aiModel
+  if (button.dataset.aiFormat) ai.format = button.dataset.aiFormat as 'jpeg' | 'png'
+  if (button.dataset.describeModel) ai.describeModel = button.dataset.describeModel
+  if (button.dataset.aiModel || button.dataset.aiRatio || button.dataset.aiResolution) refreshEstimate()
+  refresh()
+})
+
+el('#ai-caption-list').addEventListener('input', (event) => {
+  const input = event.target as HTMLInputElement
+  if (input.dataset.caption) ai.captions[Number(input.dataset.caption)] = input.value
+})
+
+el('#ai-or-connect').addEventListener('click', async () => {
+  const field = el<HTMLInputElement>('#ai-or-key')
+  const button = el<HTMLButtonElement>('#ai-or-connect')
+  button.disabled = true
+  button.textContent = 'Checking...'
+  try {
+    ai.config = await saveDescribeKey(field.value.trim())
+    field.value = ''
+  } catch (error) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = error instanceof Error ? error.message : 'Could not save that key.'
+  } finally {
+    button.disabled = false
+    button.textContent = 'Connect'
+    renderAiControls()
+  }
+})
+
+el('#ai-describe-button').addEventListener('click', async () => {
+  if (!state.products.length) return
+  ai.describing = true
+  renderDescribe()
+  try {
+    const images = await Promise.all(
+      state.products.map(async (product) => ({ id: product.id, ...(await toReference(product.file)) })),
+    )
+    const { described } = await describeProducts(ai.describeModel, ai.subject, images)
+    for (const entry of described) ai.captions[entry.id] = entry.text
+    const failed = described.filter((entry) => entry.error)
+    aiHint.className = failed.length ? 'hint error' : 'hint'
+    aiHint.textContent = failed.length
+      ? `${failed.length} of ${described.length} could not be described: ${failed[0].error}`
+      : `Described ${plural(described.length, 'product')}. Edit anything that looks wrong.`
+  } catch (error) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = error instanceof Error ? error.message : 'Could not describe those photos.'
+  } finally {
+    ai.describing = false
+    renderAiControls()
+  }
+})
+
+el('#ai-connection').addEventListener('click', () => {
+  if (ai.config?.fromEnvironment) return
+  ai.showConnect = !ai.showConnect
+  renderAiControls()
+})
+
+el<HTMLInputElement>('#ai-subject').addEventListener('input', (event) => {
+  ai.subject = (event.target as HTMLInputElement).value
+})
+el<HTMLTextAreaElement>('#ai-extra').addEventListener('input', (event) => {
+  ai.extra = (event.target as HTMLTextAreaElement).value
+})
+el<HTMLInputElement>('#ai-output-root').addEventListener('input', (event) => {
+  ai.outputRoot = (event.target as HTMLInputElement).value
+})
+el<HTMLInputElement>('#ai-folder-name').addEventListener('input', (event) => {
+  ai.folderName = (event.target as HTMLInputElement).value
+})
+el<HTMLInputElement>('#ai-concurrency').addEventListener('input', (event) => {
+  ai.concurrency = Number((event.target as HTMLInputElement).value)
+  el('#ai-concurrency-value').textContent = String(ai.concurrency)
+})
+
+el('#ai-connect-button').addEventListener('click', async () => {
+  const keyId = el<HTMLInputElement>('#ai-key-id').value.trim()
+  const keySecret = el<HTMLInputElement>('#ai-key-secret').value.trim()
+  const button = el<HTMLButtonElement>('#ai-connect-button')
+  button.disabled = true
+  button.textContent = 'Checking...'
+  try {
+    ai.config = await saveCredentials(keyId, keySecret)
+    ai.showConnect = false
+    el<HTMLInputElement>('#ai-key-secret').value = ''
+    aiHint.className = 'hint'
+  } catch (error) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = error instanceof Error ? error.message : 'Could not save those credentials.'
+  } finally {
+    button.disabled = false
+    button.textContent = 'Connect'
+    renderAiControls()
+  }
+})
+
+el('#ai-open-folder').addEventListener('click', async () => {
+  if (!ai.run) return
+  try {
+    await revealFolder(ai.run.directory)
+  } catch (error) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = error instanceof Error ? error.message : 'Could not open that folder.'
+  }
+})
+
+el('#ai-cancel').addEventListener('click', async () => {
+  if (!ai.run) return
+  try {
+    await cancelRun(ai.run.id)
+  } catch {
+    /* the poll below will show whatever actually happened */
+  }
+})
+
+function schedulePoll() {
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = setTimeout(pollRun, RUN_POLL_MS)
+}
+
+async function pollRun() {
+  if (!ai.run) return
+  try {
+    ai.run = await fetchRun(ai.run.id)
+  } catch (error) {
+    // A restarted launcher forgets its runs; the files it already wrote stay.
+    aiHint.className = 'hint error'
+    aiHint.textContent = error instanceof Error ? error.message : 'Lost track of that run.'
+    renderAiControls()
+    return
+  }
+  renderAiRun()
+  if (runActive()) schedulePoll()
+  else renderAiControls()
+}
+
+/**
+ * Everything a batch needs, whichever way it is going to be produced.
+ *
+ * The run and the extension queue want exactly the same thing — composited or
+ * per-product references, a combo list, and the prompts — so this is shared
+ * rather than written twice and drifting.
+ */
+async function buildPayload(groups: Product[][], report: (text: string) => void) {
+  const single = selectedModel()?.references === 'one'
+  const usedFolders = new Set<string>()
+  const names = groups.map((group) => comboFolder(group.map((product) => product.file.name), usedFolders))
+
+  let images: { id: number; type: string; data: string }[]
+  let combos: RunRequest['combos']
+
+  if (single) {
+    // One composited picture per combo. Ids are positional here rather than
+    // product ids, because every combo now has a reference of its own.
+    images = []
+    combos = []
+    for (const [index, group] of groups.entries()) {
+      report(`Compositing ${index + 1} of ${groups.length}...`)
+      // Yield so that label actually paints on a long batch.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const canvas = await compositeReference(group)
+      images.push({ id: index + 1, ...(await canvasToReference(canvas, names[index])) })
+      combos.push({
+        folder: names[index],
+        imageIds: [index + 1],
+        sourceNames: group.map((product) => product.file.name),
+      })
+    }
+  } else {
+    combos = groups.map((group, index) => ({
+      folder: names[index],
+      imageIds: group.map((product) => product.id),
+      sourceNames: group.map((product) => product.file.name),
+    }))
+    // Only the products that actually appear in a combo are worth uploading —
+    // "in upload order" can leave spares behind.
+    const usedIds = new Set(combos.flatMap((combo) => combo.imageIds))
+    images = await Promise.all(
+      state.products
+        .filter((product) => usedIds.has(product.id))
+        .map(async (product) => ({ id: product.id, ...(await toReference(product.file)) })),
+    )
+  }
+
+  const promptFor = (angle: ReturnType<typeof angleById>, products: string[]) =>
+    buildPrompt({
+      subject: ai.subject,
+      count: state.comboSize,
+      angle,
+      background: ai.background,
+      extra: ai.extra,
+      composite: single,
+      products,
+    })
+
+  const chosen = ai.angles.map(angleById)
+  // Without descriptions one prompt per angle covers every combo; with them
+  // the prompt names this combo's own products, so it is per combo as well.
+  const angles = chosen.map((angle) => ({
+    id: angle.id,
+    label: angle.label,
+    tag: angle.tag,
+    prompt: promptFor(angle, []),
+  }))
+
+  const captionsFor = (group: Product[]) => group.map((product) => ai.captions[product.id] ?? '')
+  const comboPrompts: Record<string, Record<string, string>> = {}
+  if (groups.some((group) => captionsFor(group).some((text) => text.trim()))) {
+    combos.forEach((combo, index) => {
+      const products = captionsFor(groups[index])
+      combo.prompts = Object.fromEntries(chosen.map((angle) => [angle.id, promptFor(angle, products)]))
+      comboPrompts[combo.folder] = combo.prompts
+    })
+  }
+
+  return { single, images, combos, angles, comboPrompts }
+}
+
+async function startAiRun() {
+  const groups = comboGroups()
+  const jobs = aiJobCount()
+  if (!groups.length || !ai.angles.length) return
+
+  const folderName = ai.folderName.trim() || defaultFolderName(state.comboSize)
+  // Real money leaves the account here, so the count and destination get said
+  // out loud one last time before anything is submitted.
+  const cost = ai.estimate
+    ? `About ${Math.round(ai.estimate.credits * jobs).toLocaleString()} credits (~$${(ai.estimate.usd * jobs).toFixed(2)})\n`
+    : ''
+  const confirmed = window.confirm(
+    `Generate ${jobs} images with Higgsfield?\n\n` +
+      `${groups.length} combos × ${ai.angles.length} angles\n` +
+      cost +
+      `Saved into "${folderName}"\n\n` +
+      'This spends credits on your Higgsfield account.',
+  )
+  if (!confirmed) return
+
+  ai.starting = true
+  renderAiControls()
+  aiGenerateText.textContent = 'Preparing...'
+
+  try {
+    const { images, combos, angles } = await buildPayload(groups, (text) => {
+      aiGenerateText.textContent = text
+    })
+
+    ai.run = await startRun({
+      model: ai.model,
+      aspectRatio: ai.ratio,
+      resolution: ai.resolution,
+      format: ai.format,
+      concurrency: ai.concurrency,
+      outputRoot: ai.outputRoot.trim(),
+      folderName,
+      images,
+      combos,
+      angles,
+    })
+    renderAiRun()
+    aiResultSection.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    schedulePoll()
+  } catch (error) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = error instanceof Error ? error.message : 'Could not start that run.'
+  } finally {
+    ai.starting = false
+    aiGenerateText.textContent = 'Generate with Higgsfield'
+    renderAiControls()
+  }
+}
+
+/**
+ * Builds the same batch as a run, but stops at the folder.
+ *
+ * Nothing is submitted anywhere — the reference images and prompts land on disk
+ * and the extension reads them from the launcher while you work.
+ */
+async function sendToExtension() {
+  const groups = comboGroups()
+  if (!groups.length || !ai.angles.length) return
+
+  ai.queueing = true
+  renderAiControls()
+  const label = el('#ai-queue-text')
+  try {
+    const { single, images, combos, angles, comboPrompts } = await buildPayload(groups, (text) => {
+      label.textContent = text
+    })
+    label.textContent = 'Writing the folder...'
+    ai.queue = await sendQueue({
+      outputRoot: ai.outputRoot.trim(),
+      folderName: ai.folderName.trim() || defaultFolderName(state.comboSize),
+      subject: ai.subject,
+      comboSize: state.comboSize,
+      model: ai.model,
+      aspectRatio: ai.ratio,
+      resolution: ai.resolution,
+      single,
+      images,
+      combos,
+      angles,
+      comboPrompts,
+    })
+    aiHint.className = 'hint'
+    aiHint.textContent = `${plural(ai.queue.items.length, 'image')} queued in ${ai.queue.directory} — open the extension on higgsfield.ai.`
+  } catch (error) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = error instanceof Error ? error.message : 'Could not build that queue.'
+  } finally {
+    ai.queueing = false
+    label.textContent = 'Send to extension'
+    renderAiControls()
+  }
+}
+
+aiGenerateButton.addEventListener('click', startAiRun)
+el('#ai-queue-button').addEventListener('click', sendToExtension)
+
+fetchConfig()
+  .then((config) => {
+    ai.config = config
+    // Fall to whatever this account can actually reach rather than leaving the
+    // panel pointed at a model every run would fail on.
+    const usable = config.models.find((model) => model.id === ai.model && model.available)
+      ?? config.models.find((model) => model.available)
+      ?? config.models[0]
+    if (usable) ai.model = usable.id
+    void refreshEstimate()
+  })
+  .catch(() => {
+    // Opened straight off disk or under `vite dev` with no launcher behind it:
+    // the canvas half still works, so this is a note rather than a failure.
+    ai.config = null
+  })
+  .finally(renderAiControls)
 
 refresh()

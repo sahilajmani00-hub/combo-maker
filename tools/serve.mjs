@@ -5,6 +5,12 @@
  * module loading behave exactly as they do in development, rebuilds only when
  * something under src/ actually changed, then opens the browser.
  *
+ * It also hosts the /api/ai routes behind the AI angle-combos section. Those
+ * live here rather than in the browser for two reasons: Higgsfield credentials
+ * must never be shipped to a page anyone can open devtools on, and only a
+ * process with filesystem access can write the master folder and its per-combo
+ * subfolders straight to disk.
+ *
  * Deliberately dependency-free: it must still run if node_modules is missing.
  */
 
@@ -13,6 +19,10 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { estimate, probeModels, readCredentials, verifyCredentials, writeCredentials } from './higgsfield.mjs'
+import * as airun from './airun.mjs'
+import * as openrouter from './openrouter.mjs'
+import * as queue from './queue.mjs'
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const dist = join(root, 'dist')
@@ -82,15 +92,350 @@ function ensureBuild() {
   return built > 0
 }
 
-function openBrowser(url) {
+/** Largest /api/ai/runs body we will read: 60 downscaled photos plus overhead. */
+const MAX_BODY_BYTES = 96 * 1024 * 1024
+
+/** Hands a URL or a folder path to the desktop to open. */
+function openExternal(target) {
   if (process.platform === 'win32') {
     // The empty string is `start`'s title argument; without it a quoted URL is
     // mistaken for the window title.
-    spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref()
+    spawn('cmd', ['/c', 'start', '', target], { detached: true, stdio: 'ignore' }).unref()
   } else if (process.platform === 'darwin') {
-    spawn('open', [url], { detached: true, stdio: 'ignore' }).unref()
+    spawn('open', [target], { detached: true, stdio: 'ignore' }).unref()
   } else {
-    spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref()
+    spawn('xdg-open', [target], { detached: true, stdio: 'ignore' }).unref()
+  }
+}
+
+/* ---------------- /api/ai ---------------- */
+
+/**
+ * The extension is a different origin (chrome-extension://…), so the queue
+ * routes have to say so explicitly. The server binds 127.0.0.1, so the only
+ * callers that can reach it are already on this machine.
+ */
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+}
+
+function sendJson(response, status, body) {
+  const payload = Buffer.from(JSON.stringify(body))
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': payload.length,
+    'Cache-Control': 'no-store',
+    ...CORS,
+  })
+  response.end(payload)
+}
+
+/** Reads a JSON body, refusing anything that would blow the process up. */
+function readJson(request) {
+  return new Promise((resolvePromise, reject) => {
+    const chunks = []
+    let size = 0
+    request.on('data', (chunk) => {
+      size += chunk.length
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error('Those photos are too large to send in one run.'))
+        request.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    request.on('end', () => {
+      if (!chunks.length) return resolvePromise({})
+      try {
+        resolvePromise(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      } catch (error) {
+        reject(new Error(`Could not read the request: ${error.message}`))
+      }
+    })
+    request.on('error', reject)
+  })
+}
+
+/** Enough of the key to recognise, never enough to use. */
+function maskKey(keyId) {
+  return keyId.length > 8 ? `${keyId.slice(0, 4)}...${keyId.slice(-4)}` : '****'
+}
+
+/**
+ * Model access is per account and does not change during a session, so the
+ * probe runs once and is reused - it is four HTTP calls, and the panel asks for
+ * the config on every render.
+ */
+let availabilityCache = null
+
+async function modelAvailability(credentials) {
+  if (!credentials) return {}
+  if (availabilityCache) return availabilityCache
+  availabilityCache = await probeModels(
+    credentials,
+    Object.entries(airun.MODELS).map(([id, model]) => ({ id, endpoint: model.endpoint })),
+  )
+  return availabilityCache
+}
+
+async function configPayload() {
+  const credentials = readCredentials(root)
+  const availability = await modelAvailability(credentials)
+  return {
+    configured: Boolean(credentials),
+    keyId: credentials ? maskKey(credentials.keyId) : null,
+    fromEnvironment: Boolean(process.env.HF_API_KEY_ID && process.env.HF_API_KEY_SECRET),
+    defaultOutputRoot: airun.defaultOutputRoot(root),
+    maxJobs: airun.MAX_JOBS,
+    describe: {
+      configured: Boolean(openrouter.readKey(root)),
+      fromEnvironment: Boolean(process.env.OPENROUTER_API_KEY),
+      defaultModel: openrouter.DEFAULT_DESCRIBE_MODEL,
+      models: openrouter.DESCRIBE_MODELS,
+    },
+    models: Object.entries(airun.MODELS).map(([id, model]) => ({
+      id,
+      label: model.label,
+      note: model.note,
+      references: model.references,
+      minImages: model.minImages ?? 1,
+      maxImages: model.maxImages,
+      aspectRatios: model.aspectRatios,
+      resolutions: model.resolutions ?? null,
+      available: availability[id]?.available ?? true,
+      unavailableReason: availability[id]?.reason ?? null,
+    })),
+  }
+}
+
+/** The queue the browser extension reads while you work on higgsfield.ai. */
+async function handleQueue(request, response, pathname, method) {
+  try {
+    if (pathname === '/api/queue' && method === 'GET') {
+      const current = queue.getQueue()
+      if (!current) {
+        sendJson(response, 404, { error: 'Nothing queued yet — send a queue from Combo Maker first.' })
+        return true
+      }
+      sendJson(response, 200, current)
+      return true
+    }
+
+    if (pathname === '/api/queue' && method === 'POST') {
+      sendJson(response, 200, queue.createQueue(root, await readJson(request)))
+      return true
+    }
+
+    if (pathname === '/api/queue/item' && method === 'POST') {
+      const body = await readJson(request)
+      const item = queue.setStatus(String(body.id ?? ''), String(body.status ?? 'pending'))
+      if (!item) {
+        sendJson(response, 404, { error: 'That queue item is gone.' })
+        return true
+      }
+      sendJson(response, 200, item)
+      return true
+    }
+
+    if (pathname === '/api/queue/reset' && method === 'POST') {
+      const current = queue.resetStatuses()
+      if (!current) {
+        sendJson(response, 404, { error: 'Nothing queued yet.' })
+        return true
+      }
+      sendJson(response, 200, current)
+      return true
+    }
+
+    if (pathname === '/api/queue/file' && method === 'GET') {
+      const relative = new URL(request.url ?? '/', 'http://localhost').searchParams.get('path')
+      const file = queue.referencePath(relative)
+      if (!file) {
+        response.writeHead(404, CORS).end('Not found')
+        return true
+      }
+      const body = readFileSync(file)
+      response.writeHead(200, {
+        'Content-Type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
+        'Content-Length': body.length,
+        'Cache-Control': 'no-cache',
+        ...CORS,
+      })
+      response.end(body)
+      return true
+    }
+
+    sendJson(response, 404, { error: 'Unknown queue route.' })
+    return true
+  } catch (error) {
+    sendJson(response, error.expected ? 400 : 500, { error: error.message })
+    if (!error.expected) console.error(`  Queue error on ${pathname}:`, error)
+    return true
+  }
+}
+
+/**
+ * Returns true when the request was an API call and has been answered.
+ *
+ * Every route is POST-or-GET only and reads nothing from the filesystem that
+ * the user did not name, so there is no CORS surface to widen here - the page
+ * and the API are the same origin by construction.
+ */
+async function handleApi(request, response, pathname) {
+  if (!pathname.startsWith('/api/')) return false
+
+  const method = request.method ?? 'GET'
+  if (method === 'OPTIONS') {
+    response.writeHead(204, CORS).end()
+    return true
+  }
+
+  if (pathname.startsWith('/api/queue')) return handleQueue(request, response, pathname, method)
+
+  const runMatch = /^\/api\/ai\/runs\/([\w-]+)(\/cancel)?$/.exec(pathname)
+
+  try {
+    if (pathname === '/api/ai/config' && method === 'GET') {
+      sendJson(response, 200, await configPayload())
+      return true
+    }
+
+    if (pathname === '/api/ai/config' && method === 'POST') {
+      const body = await readJson(request)
+      const keyId = String(body.keyId ?? '').trim()
+      const keySecret = String(body.keySecret ?? '').trim()
+      if (!keyId || !keySecret) {
+        sendJson(response, 400, { error: 'Both the key ID and the secret are needed.' })
+        return true
+      }
+      // Checked before saving, so a typo is caught here rather than 200
+      // generations into a run.
+      const check = await verifyCredentials({ keyId, keySecret })
+      if (!check.ok) {
+        sendJson(response, 400, {
+          error: check.status === 401
+            ? 'Higgsfield rejected that key ID and secret.'
+            : `Could not reach Higgsfield: ${check.message}`,
+        })
+        return true
+      }
+      writeCredentials(root, { keyId, keySecret })
+      // A different account carries different models, so the probe starts over.
+      availabilityCache = null
+      sendJson(response, 200, await configPayload())
+      return true
+    }
+
+    if (pathname === '/api/ai/describe-key' && method === 'POST') {
+      const body = await readJson(request)
+      const key = String(body.key ?? '').trim()
+      if (!key) {
+        sendJson(response, 400, { error: 'Paste an OpenRouter key first.' })
+        return true
+      }
+      const check = await openrouter.verifyKey(key)
+      if (!check.ok) {
+        sendJson(response, 400, { error: check.message })
+        return true
+      }
+      openrouter.writeKey(root, key)
+      sendJson(response, 200, await configPayload())
+      return true
+    }
+
+    if (pathname === '/api/ai/describe' && method === 'POST') {
+      const key = openrouter.readKey(root)
+      if (!key) {
+        sendJson(response, 400, { error: 'Add an OpenRouter key to describe your products.' })
+        return true
+      }
+      const body = await readJson(request)
+      const images = Array.isArray(body.images) ? body.images : []
+      const model = openrouter.DESCRIBE_MODELS.some((entry) => entry.id === body.model)
+        ? body.model
+        : openrouter.DEFAULT_DESCRIBE_MODEL
+
+      // One failed caption should not lose the others, so each resolves on its
+      // own and the browser shows which ones came back empty.
+      const described = await Promise.all(
+        images.map(async (image) => {
+          try {
+            const text = await openrouter.describeImage(key, model, { ...image, subject: body.subject })
+            return { id: image.id, text, error: null }
+          } catch (error) {
+            return { id: image.id, text: '', error: error.message }
+          }
+        }),
+      )
+      sendJson(response, 200, { model, described })
+      return true
+    }
+
+    if (pathname === '/api/ai/estimate' && method === 'POST') {
+      const credentials = readCredentials(root)
+      if (!credentials) {
+        sendJson(response, 400, { error: 'Add your Higgsfield API key and secret first.' })
+        return true
+      }
+      const body = await readJson(request)
+      const model = airun.MODELS[body.model]
+      if (!model) {
+        sendJson(response, 400, { error: 'Unknown model.' })
+        return true
+      }
+      sendJson(response, 200, await estimate(credentials, model.endpoint, airun.estimateBody(model, body)))
+      return true
+    }
+
+    if (pathname === '/api/ai/runs' && method === 'POST') {
+      const credentials = readCredentials(root)
+      if (!credentials) {
+        sendJson(response, 400, { error: 'Add your Higgsfield API key and secret first.' })
+        return true
+      }
+      const body = await readJson(request)
+      const created = airun.createRun(root, credentials, body)
+      sendJson(response, 200, airun.snapshot(created))
+      return true
+    }
+
+    if (runMatch && !runMatch[2] && method === 'GET') {
+      const found = airun.getRun(runMatch[1])
+      if (!found) {
+        sendJson(response, 404, { error: 'That run is no longer being tracked.' })
+        return true
+      }
+      sendJson(response, 200, airun.snapshot(found))
+      return true
+    }
+
+    if (runMatch && runMatch[2] && method === 'POST') {
+      sendJson(response, 200, { cancelled: airun.cancelRun(runMatch[1]) })
+      return true
+    }
+
+    if (pathname === '/api/ai/reveal' && method === 'POST') {
+      const body = await readJson(request)
+      const target = resolve(String(body.path ?? ''))
+      if (!target || !existsSync(target)) {
+        sendJson(response, 404, { error: 'That folder is not there any more.' })
+        return true
+      }
+      openExternal(target)
+      sendJson(response, 200, { opened: true })
+      return true
+    }
+
+    sendJson(response, 404, { error: 'Unknown API route.' })
+    return true
+  } catch (error) {
+    // `expected` marks the validation failures worth showing verbatim; anything
+    // else is a bug and gets a 500 so it stands out in the console.
+    sendJson(response, error.expected ? 400 : 500, { error: error.message })
+    if (!error.expected) console.error(`  API error on ${pathname}:`, error)
+    return true
   }
 }
 
@@ -104,9 +449,11 @@ function serveFile(response, filePath) {
   response.end(body)
 }
 
-const server = createServer((request, response) => {
+const server = createServer(async (request, response) => {
   try {
     const pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname)
+    if (await handleApi(request, response, pathname)) return
+
     const target = normalize(join(dist, pathname === '/' ? 'index.html' : pathname))
 
     // Refuse anything that escapes dist/ via ../ or an absolute path.
@@ -141,7 +488,7 @@ server.on('listening', () => {
   console.log('   Keep this window open while you work.')
   console.log('   Close it (or press Ctrl+C) to stop.')
   console.log('  ------------------------------------------------\n')
-  openBrowser(url)
+  openExternal(url)
 })
 
 /** Walk upward from a preferred port until one is free. */
@@ -160,6 +507,13 @@ function listen(port, attemptsLeft) {
 if (!ensureBuild()) {
   console.log('  Nothing to serve. Run "npm install" then "npm run build" and try again.\n')
   process.exit(1)
+}
+
+// A queue outlives the launcher, so a restart picks up where you left off.
+const restored = queue.restore(root)
+if (restored) {
+  const left = restored.items.filter((item) => item.status === 'pending').length
+  console.log(`  Extension queue: ${restored.folder} - ${left} of ${restored.items.length} still to do.\n`)
 }
 
 listen(Number(process.env.PORT) || 4173, 20)

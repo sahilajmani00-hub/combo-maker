@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Combo Maker Queue",
+  "version": "1.0.0",
+  "description": "Shows the reference image and prompt for each combo while you work on higgsfield.ai.",
+  "permissions": ["sidePanel", "downloads", "storage", "clipboardWrite"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Combo Maker queue" },
+  "side_panel": { "default_path": "panel.html" },
+  "icons": { "128": "icon.png" }
+}

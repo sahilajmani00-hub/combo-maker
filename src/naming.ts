@@ -1,6 +1,9 @@
 /**
  * Combo filenames are built from the source images that went into them, so a
  * combo of earring1 + earring2 + earring3 saves as "earring1&earring2&earring3".
+ *
+ * The AI section reuses the same base name for the per-combo folder it writes,
+ * so a canvas export and its AI angle shots stay recognisably the same combo.
  */
 
 /** Punctuation Windows/macOS reject in a filename. `&`, spaces and `-` are fine. */
@@ -37,13 +40,8 @@ function stem(fileName: string): string {
   return cleaned || 'image'
 }
 
-/**
- * Joins the source names with `&`.
- *
- * `used` carries the names already issued in this run so repeated uploads
- * can't produce two files fighting over one name.
- */
-export function comboName(fileNames: string[], extension: string, used: Set<string>): string {
+/** The `a&b&c` stem for a combo, with no extension and no uniqueness applied. */
+export function comboBase(fileNames: string[]): string {
   // A combo may hold the same product more than once when repeats are allowed;
   // "earring1x3&earring2" beats spelling earring1 out three times.
   const parts: string[] = []
@@ -76,14 +74,33 @@ export function comboName(fileNames: string[], extension: string, used: Set<stri
     if (base.length > MAX_BASE_LENGTH) base = base.slice(0, MAX_BASE_LENGTH).replace(/&+$/, '')
   }
   // Windows silently strips a trailing dot or space, which would break the match.
-  base = base.replace(/[. ]+$/, '') || 'combo'
+  return base.replace(/[. ]+$/, '') || 'combo'
+}
 
-  let candidate = `${base}.${extension}`
+/** Appends `-2`, `-3`… until the name is one this run has not issued yet. */
+function claim(base: string, extension: string, used: Set<string>): string {
+  const suffix = extension ? `.${extension}` : ''
+  let candidate = `${base}${suffix}`
   let counter = 2
   while (used.has(candidate.toLowerCase())) {
-    candidate = `${base}-${counter}.${extension}`
+    candidate = `${base}-${counter}${suffix}`
     counter += 1
   }
   used.add(candidate.toLowerCase())
   return candidate
+}
+
+/**
+ * Joins the source names with `&`.
+ *
+ * `used` carries the names already issued in this run so repeated uploads
+ * can't produce two files fighting over one name.
+ */
+export function comboName(fileNames: string[], extension: string, used: Set<string>): string {
+  return claim(comboBase(fileNames), extension, used)
+}
+
+/** The same name without an extension, for the AI section's per-combo folder. */
+export function comboFolder(fileNames: string[], used: Set<string>): string {
+  return claim(comboBase(fileNames), '', used)
 }

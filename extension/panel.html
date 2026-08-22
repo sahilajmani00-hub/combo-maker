@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Combo Maker queue</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand"><span class="mark">CM</span> Queue</div>
+      <button id="refresh" class="icon" title="Reload from Combo Maker">&#8635;</button>
+    </header>
+
+    <section id="offline" class="notice hidden">
+      <strong>Combo Maker isn't running.</strong>
+      <p>Start it with <code>npm start</code> (or the <em>Combo Maker</em> shortcut), send a queue from the AI tab, then hit reload above.</p>
+      <label>Port <input id="port" type="number" min="1" max="65535" /></label>
+    </section>
+
+    <section id="empty" class="notice hidden">
+      <strong>Nothing queued yet.</strong>
+      <p>In Combo Maker, open <em>AI angle combos</em>, set up your batch and press <em>Send to extension</em>.</p>
+    </section>
+
+    <section id="work" class="hidden">
+      <div class="progress"><div id="bar"></div></div>
+      <div class="counts"><span id="counts"></span><button id="only-pending" class="link">Showing all</button></div>
+
+      <div class="card">
+        <div class="card-head">
+          <strong id="combo"></strong>
+          <span id="position"></span>
+        </div>
+        <div id="references" class="references"></div>
+        <div class="row">
+          <button id="copy-image" class="ghost">Copy image</button>
+          <button id="save-image" class="ghost">Save image</button>
+        </div>
+
+        <label class="label" for="prompt">Prompt <span id="angle" class="angle"></span></label>
+        <textarea id="prompt" readonly rows="9"></textarea>
+        <button id="copy-prompt" class="primary">Copy prompt</button>
+
+        <p class="saveas">Save the result as <code id="saveas"></code></p>
+      </div>
+
+      <div class="row nav">
+        <button id="prev" class="ghost">&larr; Prev</button>
+        <button id="skip" class="ghost">Skip</button>
+        <button id="done" class="primary">Done &rarr;</button>
+      </div>
+
+      <div class="row">
+        <button id="open-folder" class="link">Open output folder</button>
+        <button id="reset" class="link danger">Reset progress</button>
+      </div>
+    </section>
+
+    <p id="status" class="status"></p>
+    <script src="panel.js"></script>
+  </body>
+</html>
