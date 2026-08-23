@@ -17,14 +17,22 @@ const BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v
 /**
  * Vision models, best first. All verified present on OpenRouter's vision list.
  *
- * Gemini is kept because it is a fine describer, but it is last for a reason:
- * reasoning is mandatory on that endpoint and cannot be switched off, so it
- * spends a few hundred tokens thinking before it writes a twelve-word phrase -
- * roughly ten times the cost of Sonnet for no better answer.
+ * Qwen3-VL 235B leads on measurement, not reputation: on real product shots it
+ * was the only one that kept colour out of the description entirely - the
+ * Claude models both reached for "pearl", which is a colour hint in all but
+ * name - and it costs about a tenth of Sonnet. Sonnet still writes the richest
+ * description when the piece is unusual, so it stays as the step up.
+ *
+ * Reasoning models are a trap for this job: they bill several hundred tokens of
+ * thinking to produce a twelve-word phrase. Gemini is last for that reason, and
+ * qwen3.7-flash is deliberately absent - it spent a 700-token ceiling reasoning
+ * and returned an empty string.
  */
 export const DESCRIBE_MODELS = [
+  { id: 'qwen/qwen3-vl-235b-a22b-instruct', label: 'Qwen3-VL 235B' },
   { id: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
   { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5' },
+  { id: 'qwen/qwen3-vl-32b-instruct', label: 'Qwen3-VL 32B' },
   { id: 'google/gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
 ]
 
@@ -53,7 +61,8 @@ const MAX_TOKENS = 700
 const SYSTEM = [
   'You describe a single piece of jewellery for a catalogue.',
   'Reply with ONE noun phrase of at most 20 words describing its shape, silhouette, construction, components, motif and style.',
-  'Never mention colour, metal tone, plating, plating colour, gemstone colour or finish - not even indirectly.',
+  'Never mention colour, metal tone, plating or finish, and avoid material names that imply a colour - no gold, silver, rose gold, pearl, jet, ivory, diamond.',
+  'Say "sphere", "bead", "cabochon" or "faceted stone" instead of naming the material.',
   'Example: "long tiered chandelier earring with a teardrop centre stone and fringed lower row".',
   'No sentences, no preamble, no punctuation at the end, no marketing language.',
 ].join(' ')
