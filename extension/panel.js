@@ -82,7 +82,7 @@ function step(delta) {
   render()
 }
 
-async function mark(status) {
+async function mark(status, advance = true) {
   const item = current()
   if (!item) return
   try {
@@ -94,9 +94,9 @@ async function mark(status) {
     item.status = status
     // Filtering to pending renumbers the list under us, so staying put is what
     // actually advances; otherwise move on by hand.
-    if (!state.onlyPending) state.index += 1
+    if (advance && !state.onlyPending) state.index += 1
     render()
-    say(status === 'done' ? 'Marked done.' : 'Skipped.')
+    say({ done: 'Marked done.', skipped: 'Skipped.', pending: 'Put back — not done.' }[status])
   } catch (error) {
     say(error.message, true)
   }
@@ -218,6 +218,12 @@ function render() {
     .map((reference) => `<img src="${referenceUrl(reference)}" alt="" loading="lazy">`)
     .join('')
 
+  const STATE_TEXT = { pending: 'Not done yet', done: 'Done ✓', skipped: 'Skipped' }
+  el('state').textContent = STATE_TEXT[item.status]
+  el('state').className = `state ${item.status}`
+  // Undo only means something once the item has actually been marked.
+  el('undo').classList.toggle('hidden', item.status === 'pending')
+
   el('done').textContent = item.status === 'done' ? 'Done ✓' : 'Done →'
   el('prev').disabled = state.index === 0
 }
@@ -233,6 +239,7 @@ el('copy-image').addEventListener('click', copyImage)
 el('save-image').addEventListener('click', saveImage)
 el('done').addEventListener('click', () => mark('done'))
 el('skip').addEventListener('click', () => mark('skipped'))
+el('undo').addEventListener('click', () => mark('pending', false))
 el('prev').addEventListener('click', () => step(-1))
 el('only-pending').addEventListener('click', () => {
   state.onlyPending = !state.onlyPending
@@ -251,7 +258,7 @@ el('open-folder').addEventListener('click', async () => {
   }
 })
 el('reset').addEventListener('click', async () => {
-  if (!confirm('Put every item back to not-done?')) return
+  if (!confirm(`Put all ${state.queue.items.length} items back to not-done?`)) return
   try {
     state.queue = await callApi('/api/queue/reset', { method: 'POST' })
     state.index = 0
@@ -261,6 +268,20 @@ el('reset').addEventListener('click', async () => {
     say(error.message, true)
   }
 })
+el('clear').addEventListener('click', async () => {
+  const total = state.queue.items.length
+  if (!confirm(`Clear this queue of ${total} items from the extension?\n\nThe folder on disk — reference images and prompts.txt — is kept.`)) return
+  try {
+    await callApi('/api/queue/clear', { method: 'POST' })
+    state.queue = null
+    state.index = 0
+    render()
+    say('Queue cleared. The folder on disk was kept.')
+  } catch (error) {
+    say(error.message, true)
+  }
+})
+
 el('port').addEventListener('change', async (event) => {
   await chrome.storage.local.set({ port: Number(event.target.value) })
   connect()

@@ -239,6 +239,11 @@ async function handleQueue(request, response, pathname, method) {
       return true
     }
 
+    if (pathname === '/api/queue/clear' && method === 'POST') {
+      sendJson(response, 200, { cleared: queue.clearQueue(root) })
+      return true
+    }
+
     if (pathname === '/api/queue/reset' && method === 'POST') {
       const current = queue.resetStatuses()
       if (!current) {

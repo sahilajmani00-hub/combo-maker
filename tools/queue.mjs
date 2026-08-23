@@ -12,7 +12,7 @@
  * browser - does not lose where you were.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
@@ -168,6 +168,31 @@ export function createQueue(root, options) {
     })),
   )
 
+  // Rebuilding into a folder that already has a queue must not silently throw
+  // away what has been finished — re-sending after a prompt tweak is a normal
+  // thing to do, and losing an afternoon of clicking to it would not be.
+  const previous = existsSync(queueFile(directory))
+    ? (() => {
+        try {
+          return JSON.parse(readFileSync(queueFile(directory), 'utf8'))
+        } catch {
+          return null
+        }
+      })()
+    : null
+  if (previous) {
+    const before = new Map(previous.items.map((item) => [item.id, item.status]))
+    let carried = 0
+    for (const item of items) {
+      const status = before.get(item.id)
+      if (status && status !== 'pending') {
+        item.status = status
+        carried += 1
+      }
+    }
+    if (carried) console.log(`  Queue rebuilt: kept ${carried} finished item(s) from the previous queue.`)
+  }
+
   active = {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
@@ -202,6 +227,24 @@ export function setStatus(itemId, status) {
   item.status = ['pending', 'done', 'skipped'].includes(status) ? status : 'pending'
   save()
   return item
+}
+
+/**
+ * Forgets the queue entirely, so the panel goes back to empty.
+ *
+ * The folder stays on disk untouched — the references and prompts.txt are work
+ * product, and "clear the list" should never be a way to lose them by accident.
+ * Pointing a queue at that folder again picks it straight back up.
+ */
+export function clearQueue(root) {
+  const had = Boolean(active)
+  active = null
+  try {
+    rmSync(join(root, POINTER_FILE), { force: true })
+  } catch {
+    /* the pointer is a convenience; failing to remove it is not fatal */
+  }
+  return had
 }
 
 /** Puts every item back to pending, for a second pass over the same queue. */

@@ -35,6 +35,12 @@ header { display: flex; align-items: center; justify-content: space-between; mar
 .card-head strong { overflow-wrap: anywhere; line-height: 1.35; }
 .card-head span { color: var(--muted); font-size: 11px; white-space: nowrap; }
 
+.state-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: -4px 0 10px; }
+.state { font-size: 10px; text-transform: uppercase; letter-spacing: .09em; font-weight: 700; color: var(--muted); }
+.state.done { color: #4d7045; }
+.state.skipped { color: #b4462a; }
+.state-row .link { padding: 0; }
+
 .references { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
 .references img { width: 100%; aspect-ratio: 1; object-fit: contain; background: #e9e7df; display: block; }
 
