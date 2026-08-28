@@ -194,6 +194,9 @@ async function configPayload() {
       fromEnvironment: Boolean(process.env.OPENROUTER_API_KEY),
       defaultModel: openrouter.DEFAULT_DESCRIBE_MODEL,
       models: openrouter.DESCRIBE_MODELS,
+      promptModels: openrouter.PROMPT_MODELS,
+      defaultPromptModel: openrouter.DEFAULT_PROMPT_MODEL,
+      productsToken: openrouter.PRODUCTS_TOKEN,
     },
     models: Object.entries(airun.MODELS).map(([id, model]) => ({
       id,
@@ -375,6 +378,45 @@ async function handleApi(request, response, pathname) {
         }),
       )
       sendJson(response, 200, { model, described })
+      return true
+    }
+
+    if (pathname === '/api/ai/write-prompts' && method === 'POST') {
+      const key = openrouter.readKey(root)
+      if (!key) {
+        sendJson(response, 400, { error: 'Add an OpenRouter key to write prompts.' })
+        return true
+      }
+      const body = await readJson(request)
+      const model = openrouter.PROMPT_MODELS.some((entry) => entry.id === body.model)
+        ? body.model
+        : openrouter.DEFAULT_PROMPT_MODEL
+      const angles = Array.isArray(body.angles) ? body.angles : []
+      if (!angles.length) {
+        sendJson(response, 400, { error: 'Pick at least one camera angle first.' })
+        return true
+      }
+      // One call per angle, in parallel — a failure on one angle should not
+      // cost the others, so each reports its own outcome.
+      const written = await Promise.all(
+        angles.map(async (angle) => {
+          try {
+            const prompt = await openrouter.writeAnglePrompt(key, model, {
+              subject: body.subject,
+              count: body.count,
+              backdrop: body.backdrop,
+              aspectRatio: body.aspectRatio,
+              extra: body.extra,
+              angleLabel: angle.label,
+              camera: angle.camera,
+            })
+            return { id: angle.id, prompt, error: null }
+          } catch (error) {
+            return { id: angle.id, prompt: '', error: error.message }
+          }
+        }),
+      )
+      sendJson(response, 200, { model, written })
       return true
     }
 

@@ -30,6 +30,7 @@ const BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v
  */
 export const DESCRIBE_MODELS = [
   { id: 'qwen/qwen3-vl-235b-a22b-instruct', label: 'Qwen3-VL 235B' },
+  { id: 'qwen/qwen3.8-max', label: 'Qwen3.8 Max' },
   { id: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
   { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5' },
   { id: 'qwen/qwen3-vl-32b-instruct', label: 'Qwen3-VL 32B' },
@@ -67,6 +68,71 @@ const SYSTEM = [
   'No sentences, no preamble, no punctuation at the end, no marketing language.',
 ].join(' ')
 
+/**
+ * Models for writing the prompt itself, best first.
+ *
+ * This runs once per camera angle rather than once per image - the prompt it
+ * writes carries a {{PRODUCTS}} slot that each combo fills in - so a run costs
+ * a handful of calls, not hundreds. That is what makes a top-tier model
+ * affordable here: eight Opus calls is pennies, eight hundred would not be.
+ */
+export const PROMPT_MODELS = [
+  { id: 'anthropic/claude-opus-4.8', label: 'Claude Opus 4.8' },
+  { id: 'anthropic/claude-opus-4.7', label: 'Claude Opus 4.7' },
+  { id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5' },
+  { id: 'x-ai/grok-4.6', label: 'Grok 4.6' },
+  { id: 'deepseek/deepseek-v3.2', label: 'DeepSeek v3.2' },
+]
+
+export const DEFAULT_PROMPT_MODEL = PROMPT_MODELS[0].id
+
+/** The slot each combo's own product descriptions are dropped into. */
+export const PRODUCTS_TOKEN = '{{PRODUCTS}}'
+
+const PROMPT_SYSTEM = [
+  'You write prompts for an AI product photographer. The output is a marketplace listing image — Amazon, Flipkart, Meesho — where the job is to stop a shopper scrolling and read clearly at thumbnail size.',
+  'You are given the product type, a camera angle, a backdrop and an aspect ratio. Write ONE prompt for that shot.',
+  '',
+  'The prompt you write MUST:',
+  `- contain the literal token ${PRODUCTS_TOKEN} exactly once, on its own line, where the list of products in the frame will be inserted;`,
+  '- instruct that colour, metal tone, plating, stone colour and finish are taken from the reference image and never invented from the text;',
+  '- instruct that no product may be redesigned, recoloured, merged, duplicated, or added;',
+  '- forbid text, logos, watermarks, hands and people;',
+  '- describe lighting, composition, spacing, depth of field and surface treatment concretely enough to be reproducible.',
+  '',
+  'Aim for a clean, bright, high-contrast commercial result that stays legible as a small thumbnail: the products fill the frame confidently, edges stay crisp, shadows stay soft and shallow.',
+  'Write 90-160 words of plain declarative sentences. No headings, no bullet points, no markdown, no preamble, no commentary — output only the prompt itself.',
+].join('\n')
+
+/** Writes the prompt for one camera angle. */
+export async function writeAnglePrompt(key, model, brief, signal) {
+  const lines = [
+    `Product type: ${brief.subject || 'products'}`,
+    `Products in the frame: ${brief.count}`,
+    `Camera angle: ${brief.angleLabel} — ${brief.camera}`,
+    `Backdrop: ${brief.backdrop}`,
+    `Aspect ratio: ${brief.aspectRatio}`,
+  ]
+  if (brief.extra?.trim()) lines.push(`Extra direction from the seller: ${brief.extra.trim()}`)
+
+  const text = await chat(
+    key,
+    model,
+    [
+      { role: 'system', content: PROMPT_SYSTEM },
+      { role: 'user', content: lines.join('\n') },
+    ],
+    signal,
+    1500,
+  )
+  const cleaned = text.replace(/^```[a-z]*\n?|```$/g, '').trim()
+  if (!cleaned.includes(PRODUCTS_TOKEN)) {
+    throw new Error(`The model left out the ${PRODUCTS_TOKEN} slot, so the products could not be named.`)
+  }
+  if (cleaned.length < 120) throw new Error('The model returned too little to use as a prompt.')
+  return cleaned
+}
+
 export function readKey(root) {
   return readSetting(root, 'OPENROUTER_API_KEY')
 }
@@ -75,7 +141,7 @@ export function writeKey(root, key) {
   writeSettings(root, { OPENROUTER_API_KEY: key })
 }
 
-async function chat(key, model, messages, signal) {
+async function chat(key, model, messages, signal, maxTokens = MAX_TOKENS) {
   const response = await fetch(`${BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -85,7 +151,7 @@ async function chat(key, model, messages, signal) {
       'HTTP-Referer': 'http://localhost/combo-maker',
       'X-Title': 'Combo Maker',
     },
-    body: JSON.stringify({ model, messages, max_tokens: MAX_TOKENS, temperature: 0.2 }),
+    body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.2 }),
     signal,
   })
   const body = await response.json().catch(() => null)

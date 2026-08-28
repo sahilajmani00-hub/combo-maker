@@ -80,6 +80,25 @@ export const ANGLES: Angle[] = [
 
 export const DEFAULT_ANGLES: AngleId[] = ['front', 'three-quarter', 'top-down', 'macro']
 
+/** The slot an AI-written prompt leaves for this combo's own products. */
+export const PRODUCTS_TOKEN = '{{PRODUCTS}}'
+
+/**
+ * Drops one combo's products into a prompt the model wrote for this angle.
+ *
+ * The prompt is written once per angle and reused across every combo, so this
+ * is the only part that varies — and when nothing has been described it still
+ * has to read as a sentence, hence the fallback wording.
+ */
+export function fillProducts(template: string, products: string[], count: number, subject: string): string {
+  const described = products.map((text) => text.trim()).filter(Boolean)
+  const item = subject.trim() || 'products'
+  const filled = described.length
+    ? `Shapes only, for identification — colours come from the image: ${described.map((text, index) => `(${index + 1}) ${text}`).join('; ')}.`
+    : `The frame holds ${count} separate ${item}, exactly as shown in the reference image.`
+  return template.split(PRODUCTS_TOKEN).join(filled)
+}
+
 export function angleById(id: AngleId): Angle {
   return ANGLES.find((angle) => angle.id === id) ?? ANGLES[0]
 }

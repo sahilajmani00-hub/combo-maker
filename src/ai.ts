@@ -31,7 +31,12 @@ export type DescribeConfig = {
   fromEnvironment: boolean
   defaultModel: string
   models: DescribeModel[]
+  promptModels: DescribeModel[]
+  defaultPromptModel: string
+  productsToken: string
 }
+
+export type WrittenPrompt = { id: string; prompt: string; error: string | null }
 
 export type Described = { id: number; text: string; error: string | null }
 
@@ -155,6 +160,17 @@ export type QueueRequest = {
 
 /** Hands the batch to the launcher for the browser extension to work through. */
 export const sendQueue = (payload: QueueRequest) => request<QueueSummary>('/api/queue', postJson(payload))
+
+/** Has a top model write one prompt per camera angle, products left as a slot. */
+export const writePrompts = (payload: {
+  model: string
+  subject: string
+  count: number
+  backdrop: string
+  aspectRatio: string
+  extra: string
+  angles: { id: string; label: string; camera: string }[]
+}) => request<{ model: string; written: WrittenPrompt[] }>('/api/ai/write-prompts', postJson(payload))
 
 export type Estimate = { credits: number; usd: number }
 

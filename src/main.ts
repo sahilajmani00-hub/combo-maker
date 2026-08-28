@@ -15,12 +15,13 @@ import {
 import { createZip, type ZipEntry } from './zip.ts'
 import { comboFolder, comboName } from './naming.ts'
 import { MAX_COMBOS, buildGroups, countGroups, minimumImages, type GroupMode } from './grouping.ts'
-import { AI_BACKGROUNDS, ANGLES, DEFAULT_ANGLES, angleById, buildPrompt, type AngleId } from './angles.ts'
+import { AI_BACKGROUNDS, ANGLES, DEFAULT_ANGLES, angleById, buildPrompt, fillProducts, type AngleId } from './angles.ts'
 import {
   canvasToReference,
   cancelRun,
   describeProducts,
   estimateRun,
+  writePrompts,
   defaultFolderName,
   fetchConfig,
   fetchRun,
@@ -94,6 +95,10 @@ const ai = {
   describing: false,
   queueing: false,
   queue: null as QueueSummary | null,
+  /** Angle id -> a prompt a top model wrote, with a {{PRODUCTS}} slot. */
+  writtenPrompts: {} as Record<string, string>,
+  promptModel: '',
+  writing: false,
 }
 
 let tab: Tab = 'canvas'
@@ -304,6 +309,15 @@ app.innerHTML = `
         <div class="field">
           <span class="field-label">Save as</span>
           <div id="ai-format-options" class="chip-row"></div>
+        </div>
+        <div class="field">
+          <span class="field-label">Prompt quality</span>
+          <div id="ai-prompt-models" class="chip-row"></div>
+          <div id="ai-write-row">
+            <button id="ai-write-button" class="ghost-button">Write prompts with AI</button>
+            <button id="ai-write-clear" class="link-button hidden">Use the built-in prompt</button>
+          </div>
+          <p id="ai-write-copy" class="mode-copy"></p>
         </div>
         <div class="field">
           <span class="field-label">Anything else to tell the model</span>
@@ -821,6 +835,8 @@ function renderAiControls() {
 
   renderDescribe()
 
+  renderPromptWriter()
+
   const groups = comboGroups()
   const jobs = aiJobCount()
   const maxJobs = ai.config?.maxJobs ?? 600
@@ -902,6 +918,26 @@ function renderDescribe() {
     .join('')
 }
 
+function renderPromptWriter() {
+  const describe = ai.config?.describe
+  if (describe && !ai.promptModel) ai.promptModel = describe.defaultPromptModel
+  el('#ai-prompt-models').innerHTML = (describe?.promptModels ?? [])
+    .map((model) => `<button class="chip ${model.id === ai.promptModel ? 'selected' : ''}" data-prompt-model="${model.id}">${escapeHtml(model.label)}</button>`)
+    .join('')
+
+  const written = Object.keys(ai.writtenPrompts).length
+  const button = el<HTMLButtonElement>('#ai-write-button')
+  button.disabled = ai.writing || !ai.angles.length || !describe?.configured
+  button.textContent = ai.writing ? 'Writing...' : written ? 'Rewrite prompts' : 'Write prompts with AI'
+  el('#ai-write-clear').classList.toggle('hidden', !written)
+
+  el('#ai-write-copy').textContent = !describe?.configured
+    ? 'Needs the OpenRouter key above.'
+    : written
+      ? `Using AI-written prompts for ${plural(written, 'angle')}. Your product descriptions are slotted into each one.`
+      : 'One call per angle, not per image, so a top model stays cheap. Without this the built-in prompt template is used.'
+}
+
 const STATUS_LABEL: Record<RunItem['status'], string> = {
   pending: 'Queued',
   running: 'Shooting',
@@ -962,7 +998,7 @@ function renderAiRun() {
 }
 
 aiPanel.addEventListener('click', (event) => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-size], button[data-mode], button[data-angle], button[data-ai-background], button[data-ai-ratio], button[data-ai-resolution], button[data-ai-model], button[data-ai-format], button[data-describe-model]')
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-size], button[data-mode], button[data-angle], button[data-ai-background], button[data-ai-ratio], button[data-ai-resolution], button[data-ai-model], button[data-ai-format], button[data-describe-model], button[data-prompt-model]')
   if (!button) return
   const { size, mode, angle } = button.dataset
   if (size) state.comboSize = Number(size) as ComboSize
@@ -978,6 +1014,7 @@ aiPanel.addEventListener('click', (event) => {
   if (button.dataset.aiModel) ai.model = button.dataset.aiModel
   if (button.dataset.aiFormat) ai.format = button.dataset.aiFormat as 'jpeg' | 'png'
   if (button.dataset.describeModel) ai.describeModel = button.dataset.describeModel
+  if (button.dataset.promptModel) ai.promptModel = button.dataset.promptModel
   if (button.dataset.aiModel || button.dataset.aiRatio || button.dataset.aiResolution) refreshEstimate()
   refresh()
 })
@@ -1001,6 +1038,46 @@ el('#ai-or-connect').addEventListener('click', async () => {
   } finally {
     button.disabled = false
     button.textContent = 'Connect'
+    renderAiControls()
+  }
+})
+
+el('#ai-write-clear').addEventListener('click', () => {
+  ai.writtenPrompts = {}
+  renderAiControls()
+})
+
+el('#ai-write-button').addEventListener('click', async () => {
+  if (!ai.angles.length) return
+  ai.writing = true
+  renderPromptWriter()
+  try {
+    const { written } = await writePrompts({
+      model: ai.promptModel,
+      subject: ai.subject,
+      count: state.comboSize,
+      backdrop: ai.background === 'auto'
+        ? 'your choice — pick an elegant surface that suits these particular pieces'
+        : ai.background,
+      aspectRatio: ai.ratio,
+      extra: ai.extra,
+      angles: ai.angles.map((id) => {
+        const angle = angleById(id)
+        return { id: angle.id, label: angle.label, camera: angle.camera }
+      }),
+    })
+    ai.writtenPrompts = {}
+    for (const entry of written) if (entry.prompt) ai.writtenPrompts[entry.id] = entry.prompt
+    const failed = written.filter((entry) => entry.error)
+    aiHint.className = failed.length ? 'hint error' : 'hint'
+    aiHint.textContent = failed.length
+      ? `${failed.length} of ${written.length} angles failed: ${failed[0].error}`
+      : `Wrote prompts for ${plural(written.length, 'angle')}.`
+  } catch (error) {
+    aiHint.className = 'hint error'
+    aiHint.textContent = error instanceof Error ? error.message : 'Could not write those prompts.'
+  } finally {
+    ai.writing = false
     renderAiControls()
   }
 })
@@ -1161,8 +1238,12 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
     )
   }
 
-  const promptFor = (angle: ReturnType<typeof angleById>, products: string[]) =>
-    buildPrompt({
+  // An AI-written prompt is a template with a slot; the built-in one is
+  // assembled outright. Either way the products for this combo go in.
+  const promptFor = (angle: ReturnType<typeof angleById>, products: string[]) => {
+    const written = ai.writtenPrompts[angle.id]
+    if (written) return fillProducts(written, products, state.comboSize, ai.subject)
+    return buildPrompt({
       subject: ai.subject,
       count: state.comboSize,
       angle,
@@ -1171,6 +1252,7 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
       composite: single,
       products,
     })
+  }
 
   const chosen = ai.angles.map(angleById)
   // Without descriptions one prompt per angle covers every combo; with them
@@ -1184,7 +1266,8 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
 
   const captionsFor = (group: Product[]) => group.map((product) => ai.captions[product.id] ?? '')
   const comboPrompts: Record<string, Record<string, string>> = {}
-  if (groups.some((group) => captionsFor(group).some((text) => text.trim()))) {
+  const described = groups.some((group) => captionsFor(group).some((text) => text.trim()))
+  if (described || Object.keys(ai.writtenPrompts).length) {
     combos.forEach((combo, index) => {
       const products = captionsFor(groups[index])
       combo.prompts = Object.fromEntries(chosen.map((angle) => [angle.id, promptFor(angle, products)]))

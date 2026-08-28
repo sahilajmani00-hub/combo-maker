@@ -138,6 +138,7 @@ textarea.text-input { resize: vertical; }
 .caption-row input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--paper); padding: 7px 9px; font: 11px Arial, sans-serif; }
 .caption-row input:focus { outline: 2px solid var(--orange); outline-offset: -1px; }
 #ai-describe-connect input { width: 100%; border: 1px solid var(--line); background: var(--paper); padding: 10px 12px; font: 12px Arial, sans-serif; }
+#ai-write-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 8px; }
 #ai-describe-run { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .field-label em { font-style: normal; text-transform: none; letter-spacing: 0; color: #a1a59d; }
 .link-button { border: 0; background: transparent; padding: 0; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line); }
