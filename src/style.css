@@ -141,6 +141,11 @@ textarea.text-input { resize: vertical; }
 .template-meta b { color: var(--ink); font-weight: 600; font-size: 12px; overflow-wrap: anywhere; }
 .template-actions { display: flex; align-items: center; gap: 4px; flex: none; }
 
+.reverse-row { display: flex; justify-content: space-between; gap: 10px; border: 1px solid var(--line); background: var(--paper); padding: 6px 9px; font: 10px Arial, sans-serif; color: var(--muted); }
+.reverse-row b { color: var(--ink); font-weight: 600; overflow-wrap: anywhere; }
+.reverse-row select { flex: none; border: 1px solid var(--line); background: #fff; padding: 3px 5px; font: 10px Arial, sans-serif; color: var(--muted); max-width: 130px; }
+#ai-reverse-folder { margin-top: 8px; }
+
 .caption-list { display: grid; gap: 6px; margin-top: 10px; }
 .caption-row { display: flex; align-items: center; gap: 8px; }
 .caption-row img { width: 32px; height: 32px; object-fit: contain; background: #f0eee7; flex: none; }

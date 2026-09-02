@@ -137,6 +137,117 @@ export async function writeAnglePrompt(key, model, brief, signal) {
   return cleaned
 }
 
+/**
+ * Turns a finished photograph back into the prompt that would recreate it.
+ *
+ * Once a batch has produced images that actually work, the look in them is
+ * worth more than the prompt that happened to produce it — the model saw the
+ * result, the prompt only asked. Reading the winners back gives a description
+ * of what actually landed, and leaving a {{PRODUCTS}} slot makes it reusable
+ * for combos that have not been shot yet.
+ *
+ * One model does both halves on purpose: whatever reads the image is what
+ * writes about it, so nothing is lost describing it to a second model.
+ */
+const REVERSE_SYSTEM = [
+  'You are looking at a finished product photograph. Write the image-generation prompt that would recreate this exact look with a different set of products.',
+  '',
+  'Describe concretely what you can see: camera angle and height, how tight the framing is, apparent lens and depth of field, composition and spacing, the surface or backdrop and its material, texture and colour, the lighting setup and its direction, the character of the shadows and reflections, and the overall mood and finish.',
+  '',
+  `Your prompt MUST contain the literal token ${PRODUCTS_TOKEN} exactly once, on its own line, where the products belong. Do NOT describe the particular products in the photograph — the token stands in for them, so the prompt can be reused. Everything else about the scene should be described precisely enough to reproduce.`,
+  '',
+  '',
+  'Two things carry most of the quality, so spend your words there. (1) The BACKDROP: name the material, colour, texture and finish exactly, and say how light falls across it and how the products sit on it — a vague surface is what makes these look fake. (2) DETAIL: require that the jewellery resolves fully — individual stones and their settings, metal grain and polish, engraving, joins and clasps, crisp edges — and that it holds up when zoomed in.',
+  '',
+  'Never mention that this is a reference, a recreation or an existing image. Write 110 to 180 words of plain declarative sentences. No headings, no bullet points, no markdown, no preamble — output only the prompt.',
+].join('\n')
+
+export async function promptFromImage(key, model, { data, type }, signal) {
+  const text = await chat(
+    key,
+    model,
+    [
+      { role: 'system', content: REVERSE_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Write the prompt that would recreate this photograph.' },
+          { type: 'image_url', image_url: { url: `data:${type};base64,${data}` } },
+        ],
+      },
+    ],
+    signal,
+    1500,
+  )
+  const cleaned = text.replace(/^```[a-z]*\n?|```$/g, '').trim()
+  if (!cleaned.includes(PRODUCTS_TOKEN)) {
+    throw new Error(`The model left out the ${PRODUCTS_TOKEN} slot.`)
+  }
+  if (cleaned.length < 120) throw new Error('The model returned too little to use as a prompt.')
+  return cleaned
+}
+
+/** Slots a per-combo prompt leaves for the things that vary shot to shot. */
+export const ANGLE_TOKEN = '{{ANGLE}}'
+export const BACKDROP_TOKEN = '{{BACKDROP}}'
+
+/**
+ * Writes the prompt for one combo by looking at that combo's own composite.
+ *
+ * The per-angle prompt is written blind — it knows there are three products but
+ * not that one is a fringed chandelier and another a flat stud, so its framing
+ * and spacing advice is generic. A model that can see the layout writes for the
+ * products actually in it.
+ *
+ * One call per combo, not per image: the angle and the backdrop are left as
+ * slots and filled per shot, so four angles still cost one call.
+ */
+const COMBO_SYSTEM = [
+  'You are looking at a flat working layout that holds several different jewellery products side by side. They are about to be re-photographed together as one studio product shot for a marketplace listing. Write the image-generation prompt for that shot.',
+  '',
+  'What you see is a layout, not a scene: its plain background is a working aid and must not appear in your prompt as the setting.',
+  '',
+  'Your prompt MUST contain both of these literal tokens, each exactly once:',
+  `- ${ANGLE_TOKEN} where the camera angle belongs;`,
+  `- ${BACKDROP_TOKEN} where the surface the products sit on belongs.`,
+  '',
+  'Your prompt MUST also:',
+  '- say how many products are in the frame and that they are DIFFERENT products, each appearing exactly once;',
+  '- describe each product briefly by shape, silhouette and construction so it can be told apart — never by colour, metal tone, plating or finish, and never using colour-implying material names (no gold, silver, rose gold, pearl, ivory, diamond); say sphere, bead, cabochon or faceted stone instead;',
+  '- state that a product which is itself a matching pair or a multi-piece set stays whole as one unit, and that no product may be split, duplicated, merged, dropped, or given an invented partner;',
+  '- require that colour, metal tone, plating, stone colour and finish come only from the reference image and are never inferred from the text;',
+  '- lay out the composition for the pieces you can actually see — their relative sizes, how much room each needs, how they should be spaced so nothing overlaps or crowds;',
+  '- require fine detail to resolve: individual stones and settings, metal grain and polish, engraving, joins and clasps, crisp edges, holding up when zoomed in;',
+  '- forbid text, logos, watermarks, hands and people.',
+  '',
+  'Write 120 to 200 words of plain declarative sentences. No headings, no bullet points, no markdown, no preamble — output only the prompt.',
+].join('\n')
+
+export async function promptForCombo(key, model, { data, type, subject, count }, signal) {
+  const text = await chat(
+    key,
+    model,
+    [
+      { role: 'system', content: COMBO_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: `Write the prompt for this layout. It holds ${count} different ${subject || 'products'}.` },
+          { type: 'image_url', image_url: { url: `data:${type};base64,${data}` } },
+        ],
+      },
+    ],
+    signal,
+    2000,
+  )
+  const cleaned = text.replace(/^```[a-z]*\n?|```$/g, '').trim()
+  for (const token of [ANGLE_TOKEN, BACKDROP_TOKEN]) {
+    if (!cleaned.includes(token)) throw new Error(`The model left out the ${token} slot.`)
+  }
+  if (cleaned.length < 150) throw new Error('The model returned too little to use as a prompt.')
+  return cleaned
+}
+
 export function readKey(root) {
   return readSetting(root, 'OPENROUTER_API_KEY')
 }

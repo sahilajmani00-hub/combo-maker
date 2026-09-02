@@ -22,6 +22,7 @@ import {
   MIXED_BACKGROUND,
   WHITE_BACKDROP,
   angleById,
+  fillShot,
   backdropFor,
   buildPrompt,
   fillProducts,
@@ -32,6 +33,8 @@ import {
   cancelRun,
   describeProducts,
   estimateRun,
+  comboPrompts,
+  reversePrompts,
   writePrompts,
   defaultFolderName,
   fetchConfig,
@@ -114,6 +117,10 @@ const ai = {
   captions: {} as Record<number, string>,
   describeModel: '',
   describing: false,
+  reverseFolder: '',
+  reverseModel: '',
+  reversing: false,
+  reversed: [] as { file: string; prompt: string; error: string | null }[],
   queueing: false,
   queue: null as QueueSummary | null,
   templates: [] as TemplateSummary[],
@@ -122,6 +129,8 @@ const ai = {
   writtenPrompts: {} as Record<string, string>,
   promptModel: '',
   writing: false,
+  /** Have a vision model write each combo's prompt from its own composite. */
+  perCombo: false,
 }
 
 let tab: Tab = 'canvas'
@@ -365,6 +374,18 @@ app.innerHTML = `
             <button id="ai-write-clear" class="link-button hidden">Use the built-in prompt</button>
           </div>
           <p id="ai-write-copy" class="mode-copy"></p>
+          <label class="toggle"><input id="ai-per-combo" type="checkbox"><span><b>Read each combo image</b><span id="ai-per-combo-copy"></span></span></label>
+        </div>
+        <div class="field">
+          <span class="field-label">Learn from finished images</span>
+          <div id="ai-reverse-models" class="chip-row"></div>
+          <input id="ai-reverse-folder" class="text-input" type="text" placeholder="Folder holding the images you generated" spellcheck="false">
+          <div id="ai-write-row">
+            <button id="ai-reverse-button" class="ghost-button">Write prompts from my images</button>
+            <button id="ai-reverse-open" class="link-button hidden">Open folder</button>
+          </div>
+          <p id="ai-reverse-copy" class="mode-copy"></p>
+          <div id="ai-reverse-list" class="caption-list"></div>
         </div>
         <div class="field">
           <span class="field-label">Anything else to tell the model</span>
@@ -575,6 +596,7 @@ function currentSettings(): Record<string, unknown> {
       describeModel: ai.describeModel,
       promptModel: ai.promptModel,
       whiteFirst: ai.whiteFirst,
+      perCombo: ai.perCombo,
       writtenPrompts: ai.writtenPrompts,
       // Captions are keyed by product id, which is reassigned on load, so they
       // travel by position instead.
@@ -604,6 +626,7 @@ function applySettings(settings: Record<string, unknown>) {
   ai.describeModel = (saved.describeModel as string) ?? ai.describeModel
   ai.promptModel = (saved.promptModel as string) ?? ai.promptModel
   ai.whiteFirst = Boolean(saved.whiteFirst)
+  ai.perCombo = Boolean(saved.perCombo)
   ai.writtenPrompts = (saved.writtenPrompts as Record<string, string>) ?? {}
   ai.captions = {}
   state.products.forEach((product, index) => {
@@ -1109,6 +1132,7 @@ function renderAiControls() {
   renderDescribe()
 
   renderPromptWriter()
+  renderReverse()
 
   const groups = comboGroups()
   const jobs = aiJobCount()
@@ -1198,6 +1222,48 @@ function renderDescribe() {
     .join('')
 }
 
+function renderReverse() {
+  const describe = ai.config?.describe
+  if (describe && !ai.reverseModel) ai.reverseModel = describe.defaultModel
+  el('#ai-reverse-models').innerHTML = (describe?.models ?? [])
+    .map((model) => `<button class="chip ${model.id === ai.reverseModel ? 'selected' : ''}" data-reverse-model="${model.id}">${escapeHtml(model.label)}</button>`)
+    .join('')
+
+  const folder = el<HTMLInputElement>('#ai-reverse-folder')
+  if (document.activeElement !== folder) {
+    folder.value = ai.reverseFolder
+    folder.placeholder = ai.queue?.directory ?? 'Folder holding the images you generated'
+  }
+
+  const button = el<HTMLButtonElement>('#ai-reverse-button')
+  button.disabled = ai.reversing || !describe?.configured
+  button.textContent = ai.reversing ? 'Reading your images...' : 'Write prompts from my images'
+  el('#ai-reverse-open').classList.toggle('hidden', !ai.reversed.length)
+
+  el('#ai-reverse-copy').textContent = !describe?.configured
+    ? 'Needs the OpenRouter key above.'
+    : ai.reversed.length
+      ? `${plural(ai.reversed.filter((entry) => entry.prompt).length, 'prompt')} written, saved as prompts-from-images.txt next to the images.`
+      : 'Reads the images you already generated and writes the prompt that would recreate each one — the backdrop and detail that actually worked, with the products left as a slot so it can be reused.'
+
+  // A derived prompt is only useful if it can be adopted, so each one can be
+  // assigned to a camera angle and used for every combo from then on.
+  const options = ai.angles
+    .map((id) => angleById(id))
+    .map((angle) => `<option value="${angle.id}">Use for ${escapeHtml(angle.label)}</option>`)
+    .join('')
+  const list = el('#ai-reverse-list')
+  list.innerHTML = ai.reversed
+    .slice(0, 8)
+    .map((entry, index) => `<div class="reverse-row">
+      <b>${escapeHtml(entry.file)}</b>
+      ${entry.error
+        ? `<span>failed: ${escapeHtml(entry.error)}</span>`
+        : `<select data-adopt="${index}"><option value="">${entry.prompt.split(' ').length} words</option>${options}</select>`}
+    </div>`)
+    .join('')
+}
+
 function renderPromptWriter() {
   const describe = ai.config?.describe
   if (describe && !ai.promptModel) ai.promptModel = describe.defaultPromptModel
@@ -1210,6 +1276,15 @@ function renderPromptWriter() {
   button.disabled = ai.writing || !ai.angles.length || !describe?.configured
   button.textContent = ai.writing ? 'Writing...' : written ? 'Rewrite prompts' : 'Write prompts with AI'
   el('#ai-write-clear').classList.toggle('hidden', !written)
+
+  el<HTMLInputElement>('#ai-per-combo').checked = ai.perCombo
+  el<HTMLInputElement>('#ai-per-combo').disabled = !describe?.configured
+  // Priced from the describe model, since that is what does the looking.
+  const combos = comboGroups().length
+  const each = { 'qwen/qwen3-vl-235b-a22b-instruct': 0.00055, 'qwen/qwen3-vl-32b-instruct': 0.00029 }[ai.describeModel] ?? 0.011
+  el('#ai-per-combo-copy').textContent = combos
+    ? `A vision model writes each combo's prompt from its own composite, so the wording fits the actual products. One call per combo — ${combos} of them, about $${(each * combos).toFixed(2)} with ${ai.describeModel.split('/').pop()}.`
+    : 'A vision model writes each combo\u2019s prompt from its own composite, so the wording fits the actual products.'
 
   el('#ai-write-copy').textContent = !describe?.configured
     ? 'Needs the OpenRouter key above.'
@@ -1278,7 +1353,7 @@ function renderAiRun() {
 }
 
 aiPanel.addEventListener('click', (event) => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-size], button[data-mode], button[data-angle], button[data-ai-background], button[data-ai-ratio], button[data-ai-resolution], button[data-ai-model], button[data-ai-format], button[data-describe-model], button[data-prompt-model]')
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-size], button[data-mode], button[data-angle], button[data-ai-background], button[data-ai-ratio], button[data-ai-resolution], button[data-ai-model], button[data-ai-format], button[data-describe-model], button[data-prompt-model], button[data-reverse-model]')
   if (!button) return
   const { size, mode, angle } = button.dataset
   if (size) state.comboSize = Number(size) as ComboSize
@@ -1295,6 +1370,7 @@ aiPanel.addEventListener('click', (event) => {
   if (button.dataset.aiFormat) ai.format = button.dataset.aiFormat as 'jpeg' | 'png'
   if (button.dataset.describeModel) ai.describeModel = button.dataset.describeModel
   if (button.dataset.promptModel) ai.promptModel = button.dataset.promptModel
+  if (button.dataset.reverseModel) ai.reverseModel = button.dataset.reverseModel
   if (button.dataset.aiModel || button.dataset.aiRatio || button.dataset.aiResolution) refreshEstimate()
   refresh()
 })
@@ -1318,6 +1394,49 @@ el('#ai-or-connect').addEventListener('click', async () => {
   } finally {
     button.disabled = false
     button.textContent = 'Connect'
+    renderAiControls()
+  }
+})
+
+el<HTMLInputElement>('#ai-per-combo').addEventListener('change', (event) => {
+  ai.perCombo = (event.target as HTMLInputElement).checked
+  refresh()
+})
+
+el<HTMLInputElement>('#ai-reverse-folder').addEventListener('input', (event) => {
+  ai.reverseFolder = (event.target as HTMLInputElement).value
+})
+
+el('#ai-reverse-list').addEventListener('change', (event) => {
+  const select = event.target as HTMLSelectElement
+  const index = select.dataset.adopt
+  if (index === undefined || !select.value) return
+  const entry = ai.reversed[Number(index)]
+  if (!entry?.prompt) return
+  ai.writtenPrompts[select.value] = entry.prompt
+  say(`Using the prompt from ${entry.file} for ${angleById(select.value as AngleId).label}.`)
+})
+
+el('#ai-reverse-open').addEventListener('click', async () => {
+  const folder = ai.reverseFolder.trim() || ai.queue?.directory
+  if (folder) await revealFolder(folder).catch(() => {})
+})
+
+el('#ai-reverse-button').addEventListener('click', async () => {
+  ai.reversing = true
+  renderReverse()
+  try {
+    const result = await reversePrompts({
+      model: ai.reverseModel,
+      folder: ai.reverseFolder.trim() || ai.queue?.directory || '',
+    })
+    ai.reversed = result.results
+    say(`Read ${plural(result.total, 'image')} — ${result.written} prompts saved into ${result.directory}.`)
+  } catch (error) {
+    ai.reversed = []
+    say(error instanceof Error ? error.message : 'Could not read those images.', true)
+  } finally {
+    ai.reversing = false
     renderAiControls()
   }
 })
@@ -1685,6 +1804,7 @@ async function sendToExtension() {
       })
     }
 
+    let read = 0
     label.textContent = 'Starting...'
     await beginQueue({
       outputRoot: ai.outputRoot.trim(),
@@ -1746,13 +1866,39 @@ async function sendToExtension() {
         )
       }
 
+      // Reading the composites is only possible once they exist, so it happens
+      // per batch — the prompt then describes the products actually in frame.
+      if (ai.perCombo && single && images.length) {
+        label.textContent = `Reading ${images.length} combo images...`
+        const { written } = await comboPrompts({
+          model: ai.describeModel,
+          subject: ai.subject,
+          count: state.comboSize,
+          images,
+        })
+        const templates = new Map(written.filter((entry) => entry.prompt).map((entry) => [entry.id, entry.prompt]))
+        combos.forEach((combo, offset) => {
+          const template = templates.get(combo.imageIds[0])
+          if (!template) return
+          const comboIndex = start + offset
+          combo.prompts = Object.fromEntries(
+            chosen.map((angle, angleIndex) => [
+              angle.id,
+              fillShot(template, angle.camera, backdropForShot(comboIndex, angleIndex)),
+            ]),
+          )
+        })
+        read += templates.size
+      }
+
       label.textContent = `Sending ${Math.min(start + QUEUE_BATCH, groups.length)} of ${groups.length}...`
       await appendQueue({ images, combos })
     }
 
     label.textContent = 'Finishing...'
     ai.queue = await finishQueue()
-    message = { text: `${plural(ai.queue.items.length, 'image')} queued in ${ai.queue.directory} — open the extension on higgsfield.ai.`, error: false }
+    const readNote = read ? ` ${read} prompts written from the combo images.` : ''
+    message = { text: `${plural(ai.queue.items.length, 'image')} queued in ${ai.queue.directory}.${readNote} Open the extension on higgsfield.ai.`, error: false }
   } catch (error) {
     message = { text: error instanceof Error ? error.message : 'Could not build that queue.', error: true }
   } finally {

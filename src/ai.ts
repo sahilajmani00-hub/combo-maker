@@ -218,6 +218,29 @@ export function fileToBase64(file: File): Promise<string> {
   return blobToBase64(file, file.name)
 }
 
+/** One prompt per combo, written by a model that looked at that combo. */
+export const comboPrompts = (payload: {
+  model: string
+  subject: string
+  count: number
+  images: { id: number; type: string; data: string }[]
+}) => request<{ model: string; written: { id: number; prompt: string; error: string | null }[] }>(
+  '/api/ai/combo-prompts',
+  postJson(payload),
+)
+
+export type ReversedPrompt = { file: string; prompt: string; error: string | null }
+
+/**
+ * Reads finished images off disk and writes the prompt that would recreate
+ * each — same model reading and writing, with a {{PRODUCTS}} slot left in.
+ */
+export const reversePrompts = (payload: { model: string; folder: string; limit?: number }) =>
+  request<{ model: string; directory: string; total: number; written: number; results: ReversedPrompt[] }>(
+    '/api/ai/reverse',
+    postJson(payload),
+  )
+
 export type Estimate = { credits: number; usd: number }
 
 /** Cost of a single generation with these settings, straight from the API. */

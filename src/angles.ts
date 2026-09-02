@@ -99,6 +99,15 @@ export function fillProducts(template: string, products: string[], count: number
   return template.split(PRODUCTS_TOKEN).join(filled)
 }
 
+/** Slots a per-combo prompt leaves for what changes shot to shot. */
+export const ANGLE_TOKEN = '{{ANGLE}}'
+export const BACKDROP_TOKEN = '{{BACKDROP}}'
+
+/** Fills a per-combo prompt in for one particular shot. */
+export function fillShot(template: string, camera: string, backdrop: string): string {
+  return template.split(ANGLE_TOKEN).join(camera).split(BACKDROP_TOKEN).join(backdrop)
+}
+
 export function angleById(id: AngleId): Angle {
   return ANGLES.find((angle) => angle.id === id) ?? ANGLES[0]
 }

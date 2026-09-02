@@ -16,7 +16,7 @@
 
 import { createServer } from 'node:http'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { estimate, probeModels, readCredentials, verifyCredentials, writeCredentials } from './higgsfield.mjs'
@@ -212,6 +212,77 @@ async function configPayload() {
       unavailableReason: availability[id]?.reason ?? null,
     })),
   }
+}
+
+const IMAGE_FILE = /\.(jpe?g|png|webp)$/i
+
+/** Every image under a folder, newest first, skipping our own references. */
+function findImages(directory, found = [], depth = 0) {
+  if (depth > 4 || found.length >= 400) return found
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.name.startsWith('.') || entry.name === '_references') continue
+    const full = join(directory, entry.name)
+    if (entry.isDirectory()) findImages(full, found, depth + 1)
+    else if (IMAGE_FILE.test(entry.name)) found.push(full)
+    if (found.length >= 400) break
+  }
+  return found
+}
+
+/**
+ * Reads finished images and writes a reusable prompt for each.
+ *
+ * The files stay server-side — sending a few hundred finished photographs out
+ * to the browser and back again purely to reach the model would be absurd.
+ */
+async function reversePrompts(key, model, body) {
+  const directory = resolve(String(body.folder ?? '').trim() || queue.getQueue()?.directory || '')
+  if (!directory || !existsSync(directory)) {
+    const error = new Error('That folder is not there. Point it at where you saved the generated images.')
+    error.expected = true
+    throw error
+  }
+
+  const files = findImages(directory)
+  if (!files.length) {
+    const error = new Error(`No images found under ${directory}.`)
+    error.expected = true
+    throw error
+  }
+
+  const limit = Math.max(1, Math.min(Number(body.limit) || files.length, files.length))
+  const chosen = files.slice(0, limit)
+  const results = new Array(chosen.length)
+
+  let cursor = 0
+  await Promise.all(
+    Array.from({ length: Math.min(4, chosen.length) }, async () => {
+      while (cursor < chosen.length) {
+        const index = cursor++
+        const file = chosen[index]
+        try {
+          const type = extname(file).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg'
+          const prompt = await openrouter.promptFromImage(key, model, {
+            data: readFileSync(file).toString('base64'),
+            type,
+          })
+          results[index] = { file: file.slice(directory.length + 1), prompt, error: null }
+        } catch (error) {
+          results[index] = { file: file.slice(directory.length + 1), prompt: '', error: error.message }
+        }
+      }
+    }),
+  )
+
+  // Written next to the images so the work is not trapped in a browser tab.
+  const written = results.filter((entry) => entry.prompt)
+  writeFileSync(join(directory, 'prompts-from-images.json'), `${JSON.stringify({ model, results }, null, 2)}\n`, 'utf8')
+  writeFileSync(
+    join(directory, 'prompts-from-images.txt'),
+    results.map((entry) => `=== ${entry.file}\n${entry.prompt || `(failed: ${entry.error})`}\n`).join('\n'),
+    'utf8',
+  )
+  return { model, directory, total: results.length, written: written.length, results }
 }
 
 /** Saved setups, so a refresh is not the end of an afternoon's work. */
@@ -428,6 +499,59 @@ async function handleApi(request, response, pathname) {
         }),
       )
       sendJson(response, 200, { model, described })
+      return true
+    }
+
+    // One prompt per combo, written by a model that can see that combo.
+    if (pathname === '/api/ai/combo-prompts' && method === 'POST') {
+      const key = openrouter.readKey(root)
+      if (!key) {
+        sendJson(response, 400, { error: 'Add an OpenRouter key first.' })
+        return true
+      }
+      const body = await readJson(request)
+      const model = openrouter.DESCRIBE_MODELS.some((entry) => entry.id === body.model)
+        ? body.model
+        : openrouter.DEFAULT_DESCRIBE_MODEL
+      const images = Array.isArray(body.images) ? body.images : []
+
+      const written = new Array(images.length)
+      let cursor = 0
+      await Promise.all(
+        Array.from({ length: Math.min(4, images.length) }, async () => {
+          while (cursor < images.length) {
+            const index = cursor++
+            const image = images[index]
+            try {
+              const prompt = await openrouter.promptForCombo(key, model, {
+                data: image.data,
+                type: image.type,
+                subject: body.subject,
+                count: body.count,
+              })
+              written[index] = { id: image.id, prompt, error: null }
+            } catch (error) {
+              written[index] = { id: image.id, prompt: '', error: error.message }
+            }
+          }
+        }),
+      )
+      sendJson(response, 200, { model, written })
+      return true
+    }
+
+    // Reverse: read finished images off disk and write the prompt for each.
+    if (pathname === '/api/ai/reverse' && method === 'POST') {
+      const key = openrouter.readKey(root)
+      if (!key) {
+        sendJson(response, 400, { error: 'Add an OpenRouter key first.' })
+        return true
+      }
+      const body = await readJson(request)
+      const model = openrouter.DESCRIBE_MODELS.some((entry) => entry.id === body.model)
+        ? body.model
+        : openrouter.DEFAULT_DESCRIBE_MODEL
+      sendJson(response, 200, await reversePrompts(key, model, body))
       return true
     }
 
