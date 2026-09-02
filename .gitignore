@@ -21,6 +21,9 @@ dist-ssr
 # Points at the queue folder the browser extension is working through
 /.active-queue
 
+# Saved product setups — your own photos, not part of the tool
+/templates/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -110,9 +110,44 @@ export function angleById(id: AngleId): Angle {
  */
 export const AUTO_BACKGROUND = 'auto'
 
+/** Every combo gets a different surface from SCENE_BACKDROPS. */
+export const MIXED_BACKGROUND = 'mixed'
+
+/**
+ * Real surfaces a product would actually be photographed on.
+ *
+ * Deliberately coloured and textured: a flat white sweep is what makes a set
+ * look like clip-art, and the whole point of re-shooting is that the result
+ * should read as a photograph of an object sitting somewhere.
+ */
+export const SCENE_BACKDROPS = [
+  'a warm sand-toned plaster surface with soft natural texture',
+  'a deep charcoal slate slab with a matte, faintly uneven finish',
+  'a muted sage-green painted wood surface with fine grain',
+  'a dusty terracotta clay surface with a chalky matte bloom',
+  'a soft dove-grey polished concrete slab with fine aggregate speckle',
+  'a warm oatmeal linen cloth falling in gentle folds',
+  'a deep burgundy velvet surface with soft directional pile',
+  'a pale champagne satin drape with shallow rippling highlights',
+  'a smoky blue-grey stone slab with subtle mineral veining',
+  'a warm walnut wood surface with open visible grain',
+]
+
+/**
+ * Which surface this combo sits on.
+ *
+ * Cycling by index rather than at random keeps a run reproducible — rebuild the
+ * same queue and combo 7 lands on the same surface it had before.
+ */
+export function backdropFor(background: string, comboIndex: number): string {
+  if (background === MIXED_BACKGROUND) return SCENE_BACKDROPS[comboIndex % SCENE_BACKDROPS.length]
+  return background
+}
+
 /** Backdrops phrased the way the model reads them, not as hex colours. */
 export const AI_BACKGROUNDS = [
   { id: 'clean seamless white', label: 'White' },
+  { id: MIXED_BACKGROUND, label: 'Mixed (varied)' },
   { id: AUTO_BACKGROUND, label: 'Classy (auto)' },
   { id: 'soft ivory paper', label: 'Ivory' },
   { id: 'warm beige studio', label: 'Beige' },
@@ -161,11 +196,25 @@ export function buildPrompt({ subject, count, angle, background, extra, composit
     ? `The reference image is a flat layout of ${count} separate ${item}. Re-photograph all ${count} of them together in one frame as real objects.`
     : `The ${count} reference images are ${count} separate ${item}. Photograph all ${count} of them together in one frame.`
   const described = products.map((text) => text.trim()).filter(Boolean)
+  const white = background === 'clean seamless white'
+
+  /**
+   * Without this the model copies the reference's flat white ground straight
+   * into the result — it has no way to know that background was a layout aid
+   * rather than part of the scene.
+   */
+  const ignoreReferenceGround = composite
+    ? 'Its plain background is NOT the scene — it is a working layout only. Ignore that background completely and build the environment described below around the products.'
+    : 'Their plain backgrounds are NOT the scene. Ignore them completely and build the environment described below around the products.'
+
+  const realism = white
+    ? 'Shoot it as a real photograph on a full-frame camera with an 85mm macro lens at f/5.6: true optics, natural depth-of-field falloff, believable specular highlights on metal and stones, soft-edged contact shadows grounding each piece. Clean and bright, but never a flat cut-out — it must read as something photographed, not rendered.'
+    : 'Shoot it as a real photograph on a full-frame camera with an 85mm macro lens at f/4: true optics, natural depth-of-field falloff, shallow but honest focus. Physically plausible studio lighting — a large softbox key slightly off-axis, gentle bounce fill, and soft-edged contact shadows that sit the pieces convincingly on the surface. Render the surface with its real texture and micro-detail, faint ambient colour bounce onto the metal, believable reflections. It must look like an actual photograph, not a 3D render, not a cut-out pasted onto a colour.'
   // "Classy (auto)" hands the choice over instead of naming a surface, with
   // enough of a brief that it stays a product shot rather than a still life.
   const backdrop = background === AUTO_BACKGROUND
-    ? `Style the set on an elegant editorial backdrop chosen to suit these particular pieces — a refined surface such as draped silk, velvet, brushed stone, fine linen or polished wood, in a tone that flatters the jewellery and keeps it the clear subject. Arrange them with even spacing and consistent scale, soft diffused studio lighting, subtle contact shadows, sharp focus across the whole frame, high detail, luxury commercial quality.`
-    : `Arrange them with even spacing and consistent scale on a ${background} backdrop, soft diffused studio lighting, subtle contact shadows, sharp focus across the whole frame, high detail, commercial e-commerce quality.`
+    ? 'Set the pieces on an elegant surface chosen to suit them — draped silk, velvet, brushed stone, fine linen or polished wood — in a colour that flatters the jewellery and keeps it the clear subject. Arrange them with even spacing and consistent scale.'
+    : `Set the pieces on ${background}. Arrange them with even spacing and consistent scale, the surface filling the frame behind and beneath them as a real environment.`
   const lines = [
     `Professional studio product photograph showing exactly ${count} ${item} together in one frame.`,
     source,
@@ -174,10 +223,12 @@ export function buildPrompt({ subject, count, angle, background, extra, composit
     lines.push(`Shapes only, for identification — colours come from the image: ${described.map((text, index) => `(${index + 1}) ${text}`).join('; ')}.`)
   }
   lines.push(
+    ignoreReferenceGround,
     `Camera: ${angle.camera}.`,
     `Take the exact colour, metal tone, plating, stone colour and finish of every product from the reference image — match what you see there precisely, and never infer them from this text. Shape, texture and proportions must match the reference too. Do not redesign, recolour, merge or duplicate any product, and do not add a product that is not in the reference.`,
     backdrop,
-    `No text, no logos, no watermarks, no hands, no people.`,
+    realism,
+    `No text, no logos, no watermarks, no hands, no people. Nothing added to the scene beyond the surface described.`,
   )
   if (extra.trim()) lines.push(extra.trim())
   return lines.join('\n')

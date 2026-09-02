@@ -228,6 +228,34 @@ function render() {
   el('prev').disabled = state.index === 0
 }
 
+/**
+ * Keyboard shortcuts, so the loop is press-a-key then Cmd/Ctrl+V in the page
+ * rather than aiming at a button between every paste.
+ *
+ * Nothing fires while a text field has focus — the prompt box is selectable,
+ * and typing a port number should not mark anything done.
+ */
+const SHORTCUTS = {
+  i: copyImage,
+  c: copyPrompt,
+  s: saveImage,
+  d: () => mark('done'),
+  k: () => mark('skipped'),
+  u: () => { if (current()?.status !== 'pending') mark('pending', false) },
+  arrowleft: () => step(-1),
+  arrowright: () => step(1),
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  const tag = document.activeElement?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return
+  const action = SHORTCUTS[event.key.toLowerCase()]
+  if (!action) return
+  event.preventDefault()
+  action()
+})
+
 /* ---------------- wiring ---------------- */
 
 el('refresh').addEventListener('click', () => {

@@ -132,6 +132,15 @@ textarea.text-input { resize: vertical; }
 .connect-box code { font-size: 11px; background: #efece3; padding: 1px 4px; }
 .count-label.connected { color: #4d7045; }
 .wide-button { width: 100%; margin-top: 10px; text-align: center; display: block; }
+.template-row { display: flex; gap: 8px; }
+.template-row .text-input { flex: 1; min-width: 0; }
+.template-row .ghost-button { flex: none; }
+.template-list { display: grid; gap: 6px; margin-top: 10px; }
+.template-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); background: var(--paper); padding: 8px 10px; font: 11px Arial, sans-serif; color: var(--muted); }
+.template-meta { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.template-meta b { color: var(--ink); font-weight: 600; font-size: 12px; overflow-wrap: anywhere; }
+.template-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+
 .caption-list { display: grid; gap: 6px; margin-top: 10px; }
 .caption-row { display: flex; align-items: center; gap: 8px; }
 .caption-row img { width: 32px; height: 32px; object-fit: contain; background: #f0eee7; flex: none; }

@@ -15,7 +15,17 @@ import {
 import { createZip, type ZipEntry } from './zip.ts'
 import { comboFolder, comboName } from './naming.ts'
 import { MAX_COMBOS, buildGroups, countGroups, minimumImages, type GroupMode } from './grouping.ts'
-import { AI_BACKGROUNDS, ANGLES, DEFAULT_ANGLES, angleById, buildPrompt, fillProducts, type AngleId } from './angles.ts'
+import {
+  AI_BACKGROUNDS,
+  ANGLES,
+  DEFAULT_ANGLES,
+  MIXED_BACKGROUND,
+  angleById,
+  backdropFor,
+  buildPrompt,
+  fillProducts,
+  type AngleId,
+} from './angles.ts'
 import {
   canvasToReference,
   cancelRun,
@@ -26,7 +36,12 @@ import {
   fetchConfig,
   fetchRun,
   revealFolder,
+  deleteTemplate,
+  fileToBase64,
+  listTemplates,
+  loadTemplate,
   saveCredentials,
+  saveTemplate,
   sendQueue,
   saveDescribeKey,
   startRun,
@@ -37,6 +52,7 @@ import {
   type RunRequest,
   type RunItem,
   type RunSnapshot,
+  type TemplateSummary,
 } from './ai.ts'
 
 type Product = { id: number; file: File; url: string }
@@ -95,6 +111,8 @@ const ai = {
   describing: false,
   queueing: false,
   queue: null as QueueSummary | null,
+  templates: [] as TemplateSummary[],
+  templateBusy: false,
   /** Angle id -> a prompt a top model wrote, with a {{PRODUCTS}} slot. */
   writtenPrompts: {} as Record<string, string>,
   promptModel: '',
@@ -176,9 +194,20 @@ app.innerHTML = `
         <label class="dropzone" id="dropzone" for="file-input">
           <input id="file-input" type="file" accept="image/*" multiple>
           <span class="upload-icon">+</span><strong>Drop product images here</strong><span>or <u>browse your files</u></span>
-          <small>JPG, PNG or WEBP · up to ${MAX_PRODUCTS} images</small>
+          <small>JPG, PNG or WEBP · up to ${MAX_PRODUCTS} images · or paste with &#8984;V</small>
         </label>
         <div id="product-list" class="product-list"></div>
+
+        <div class="rule"></div>
+        <div class="field">
+          <span class="field-label">Templates</span>
+          <div class="template-row">
+            <input id="template-name" class="text-input" type="text" placeholder="Name this setup" spellcheck="false">
+            <button id="template-save" class="ghost-button">Save</button>
+          </div>
+          <div id="template-list" class="template-list"></div>
+          <p class="mode-copy">Saves your photos and every setting to disk, so a refresh — or a new browser — picks up exactly where you left off. Saving over a name replaces it.</p>
+        </div>
       </section>
 
       <section class="panel recipe-panel">
@@ -510,6 +539,94 @@ function renderResults() {
     .join('')
 }
 
+/**
+ * Everything a template carries besides the photos.
+ *
+ * Both halves of the app are included on purpose: the canvas settings decide
+ * what the AI reference composite looks like, so restoring one without the
+ * other would give a different result from the one that was saved.
+ */
+function currentSettings(): Record<string, unknown> {
+  return {
+    canvas: { ...state, products: undefined },
+    ai: {
+      angles: ai.angles,
+      subject: ai.subject,
+      background: ai.background,
+      ratio: ai.ratio,
+      model: ai.model,
+      resolution: ai.resolution,
+      format: ai.format,
+      concurrency: ai.concurrency,
+      extra: ai.extra,
+      outputRoot: ai.outputRoot,
+      folderName: ai.folderName,
+      describeModel: ai.describeModel,
+      promptModel: ai.promptModel,
+      writtenPrompts: ai.writtenPrompts,
+      // Captions are keyed by product id, which is reassigned on load, so they
+      // travel by position instead.
+      captions: state.products.map((product) => ai.captions[product.id] ?? ''),
+    },
+  }
+}
+
+function applySettings(settings: Record<string, unknown>) {
+  const canvas = (settings.canvas ?? {}) as Partial<typeof state>
+  Object.assign(state, canvas, { products: state.products })
+  state.layout = normalizeLayout(state.comboSize, state.layout)
+
+  const saved = (settings.ai ?? {}) as Record<string, unknown>
+  const captions = Array.isArray(saved.captions) ? (saved.captions as string[]) : []
+  ai.angles = (saved.angles as AngleId[]) ?? ai.angles
+  ai.subject = (saved.subject as string) ?? ai.subject
+  ai.background = (saved.background as string) ?? ai.background
+  ai.ratio = (saved.ratio as string) ?? ai.ratio
+  ai.model = (saved.model as string) ?? ai.model
+  ai.resolution = (saved.resolution as string) ?? ai.resolution
+  ai.format = (saved.format as 'jpeg' | 'png') ?? ai.format
+  ai.concurrency = (saved.concurrency as number) ?? ai.concurrency
+  ai.extra = (saved.extra as string) ?? ai.extra
+  ai.outputRoot = (saved.outputRoot as string) ?? ai.outputRoot
+  ai.folderName = (saved.folderName as string) ?? ai.folderName
+  ai.describeModel = (saved.describeModel as string) ?? ai.describeModel
+  ai.promptModel = (saved.promptModel as string) ?? ai.promptModel
+  ai.writtenPrompts = (saved.writtenPrompts as Record<string, string>) ?? {}
+  ai.captions = {}
+  state.products.forEach((product, index) => {
+    if (captions[index]) ai.captions[product.id] = captions[index]
+  })
+
+  // The controls read their values from state on render, except the free-text
+  // boxes and sliders, which hold their own.
+  el<HTMLInputElement>('#ai-subject').value = ai.subject
+  el<HTMLTextAreaElement>('#ai-extra').value = ai.extra
+  el<HTMLInputElement>('#padding-input').value = String(state.padding)
+  el('#padding-value').textContent = `${state.padding}%`
+  el<HTMLInputElement>('#gap-input').value = String(state.gap)
+  el('#gap-value').textContent = `${state.gap}%`
+  el<HTMLInputElement>('#trim-input').checked = state.trim
+  el<HTMLInputElement>('#uniform-input').checked = state.uniformScale
+  el<HTMLInputElement>('#baseline-input').checked = state.align === 'bottom'
+  el<HTMLInputElement>('#ai-concurrency').value = String(ai.concurrency)
+  el('#ai-concurrency-value').textContent = String(ai.concurrency)
+}
+
+function renderTemplates() {
+  const list = el('#template-list')
+  list.innerHTML = ai.templates.length
+    ? ai.templates
+        .map((template) => `<div class="template-item">
+          <span class="template-meta"><b>${escapeHtml(template.name)}</b>${plural(template.productCount, 'image')}${template.savedAt ? ` · ${new Date(template.savedAt).toLocaleDateString()}` : ''}</span>
+          <span class="template-actions">
+            <button class="chip" data-template-load="${template.id}">Load</button>
+            <button class="icon-button remove-button" data-template-delete="${template.id}" aria-label="Delete ${escapeHtml(template.name)}">&times;</button>
+          </span>
+        </div>`)
+        .join('')
+    : '<div class="empty-state">No saved templates yet.</div>'
+}
+
 function renderTabs() {
   document.querySelectorAll<HTMLButtonElement>('.mode-tab').forEach((button) => {
     const selected = button.dataset.tab === tab
@@ -522,6 +639,7 @@ function renderTabs() {
 
 function refresh() {
   renderTabs()
+  renderTemplates()
   renderProducts()
   renderControls()
   renderAiControls()
@@ -540,6 +658,7 @@ function addFiles(files: FileList | File[]) {
     ...accepted.map((file) => ({ id: nextId++, file, url: URL.createObjectURL(file) })),
   ]
   refresh()
+void refreshTemplates()
   if (incoming.length > accepted.length) {
     const message = `Only ${MAX_PRODUCTS} images fit at once — ${incoming.length - accepted.length} were skipped.`
     const target = tab === 'ai' ? aiHint : hint
@@ -569,6 +688,46 @@ function moveProduct(id: number, direction: 'up' | 'down') {
   refresh()
 }
 
+/**
+ * Pasted images arrive without a useful filename — a screenshot is "image.png"
+ * every time — and combo names are built from filenames, so every combo would
+ * end up called "image". Anything generic gets numbered instead.
+ */
+let pastedCount = 0
+const GENERIC_NAME = /^(image|screenshot|photo|unknown|pasted)\b|^$/i
+
+function namePasted(file: File): File {
+  const base = file.name.replace(/\.[a-z0-9]+$/i, '')
+  if (!GENERIC_NAME.test(base)) return file
+  pastedCount += 1
+  const extension = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg')
+  return new File([file], `pasted-${String(pastedCount).padStart(2, '0')}.${extension}`, { type: file.type })
+}
+
+/**
+ * Paste anywhere on the page to add products.
+ *
+ * Skipped while a text field has focus, so pasting into the subject or extra
+ * notes boxes still does what it should.
+ */
+document.addEventListener('paste', (event) => {
+  const active = document.activeElement as HTMLElement | null
+  const tag = active?.tagName
+  if (tag === 'TEXTAREA' || (tag === 'INPUT' && (active as HTMLInputElement).type !== 'file')) return
+
+  const images = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith('image/'))
+  if (!images.length) return
+  event.preventDefault()
+
+  const before = state.products.length
+  addFiles(images.map(namePasted))
+  const added = state.products.length - before
+  if (!added) return
+  const target = tab === 'ai' ? aiHint : hint
+  target.className = 'hint'
+  target.textContent = `Pasted ${plural(added, 'image')}.`
+})
+
 fileInput.addEventListener('change', () => {
   if (fileInput.files) addFiles(fileInput.files)
   fileInput.value = ''
@@ -591,6 +750,92 @@ dropzone.addEventListener('drop', (event) => {
   event.preventDefault()
   dropzone.classList.remove('dragging')
   if (event.dataTransfer?.files.length) addFiles(event.dataTransfer.files)
+})
+
+/* ---------------- templates ---------------- */
+
+async function refreshTemplates() {
+  try {
+    ai.templates = (await listTemplates()).templates
+  } catch {
+    // No launcher (opened off disk, or vite dev alone) — the rest still works.
+    ai.templates = []
+  }
+  renderTemplates()
+}
+
+el('#template-save').addEventListener('click', async () => {
+  const field = el<HTMLInputElement>('#template-name')
+  const name = field.value.trim()
+  if (!name) {
+    hint.className = 'hint error'
+    hint.textContent = 'Give the template a name first.'
+    return
+  }
+  const button = el<HTMLButtonElement>('#template-save')
+  button.disabled = true
+  button.textContent = 'Saving...'
+  try {
+    const products = await Promise.all(
+      state.products.map(async (product) => ({
+        name: product.file.name,
+        type: product.file.type,
+        data: await fileToBase64(product.file),
+      })),
+    )
+    ai.templates = (await saveTemplate({ name, products, settings: currentSettings() })).templates
+    hint.className = 'hint'
+    hint.textContent = `Saved "${name}" — ${plural(products.length, 'image')} and every setting.`
+  } catch (error) {
+    hint.className = 'hint error'
+    hint.textContent = error instanceof Error ? error.message : 'Could not save that template.'
+  } finally {
+    button.disabled = false
+    button.textContent = 'Save'
+    renderTemplates()
+  }
+})
+
+el('#template-list').addEventListener('click', async (event) => {
+  const target = event.target as HTMLElement
+  const load = target.closest<HTMLButtonElement>('[data-template-load]')
+  const remove = target.closest<HTMLButtonElement>('[data-template-delete]')
+  if (!load && !remove) return
+
+  if (remove) {
+    const id = remove.dataset.templateDelete!
+    if (!window.confirm('Delete this template? The photos saved inside it go too.')) return
+    try {
+      ai.templates = (await deleteTemplate(id)).templates
+    } catch (error) {
+      hint.className = 'hint error'
+      hint.textContent = error instanceof Error ? error.message : 'Could not delete that template.'
+    }
+    renderTemplates()
+    return
+  }
+
+  const id = load!.dataset.templateLoad!
+  if (state.products.length && !window.confirm('Load this template? It replaces the products and settings on screen.')) return
+  try {
+    const template = await loadTemplate(id)
+    // Out with the old object URLs first, or they leak for the tab's lifetime.
+    state.products.forEach((product) => URL.revokeObjectURL(product.url))
+    prepCache.clear()
+    state.products = template.products.map((product) => {
+      const bytes = Uint8Array.from(atob(product.data), (char) => char.charCodeAt(0))
+      const file = new File([bytes], product.name, { type: product.type })
+      return { id: nextId++, file, url: URL.createObjectURL(file) }
+    })
+    applySettings(template.settings)
+    el<HTMLInputElement>('#template-name').value = template.name
+    refresh()
+    hint.className = 'hint'
+    hint.textContent = `Loaded "${template.name}" — ${plural(state.products.length, 'image')}.`
+  } catch (error) {
+    hint.className = 'hint error'
+    hint.textContent = error instanceof Error ? error.message : 'Could not load that template.'
+  }
 })
 
 el('.mode-switch').addEventListener('click', (event) => {
@@ -1057,8 +1302,10 @@ el('#ai-write-button').addEventListener('click', async () => {
       subject: ai.subject,
       count: state.comboSize,
       backdrop: ai.background === 'auto'
-        ? 'your choice — pick an elegant surface that suits these particular pieces'
-        : ai.background,
+        ? 'your choice — pick an elegant, real surface that suits these particular pieces'
+        : ai.background === MIXED_BACKGROUND
+          ? 'varies per image — describe a real, textured, coloured studio surface generically (never white sweep) and let each shot differ'
+          : ai.background,
       aspectRatio: ai.ratio,
       extra: ai.extra,
       angles: ai.angles.map((id) => {
@@ -1240,14 +1487,16 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
 
   // An AI-written prompt is a template with a slot; the built-in one is
   // assembled outright. Either way the products for this combo go in.
-  const promptFor = (angle: ReturnType<typeof angleById>, products: string[]) => {
+  const promptFor = (angle: ReturnType<typeof angleById>, products: string[], comboIndex: number) => {
     const written = ai.writtenPrompts[angle.id]
     if (written) return fillProducts(written, products, state.comboSize, ai.subject)
     return buildPrompt({
       subject: ai.subject,
       count: state.comboSize,
       angle,
-      background: ai.background,
+      // "Mixed" gives each combo its own surface, so the set does not come back
+      // as forty variations of the same shot.
+      background: backdropFor(ai.background, comboIndex),
       extra: ai.extra,
       composite: single,
       products,
@@ -1261,16 +1510,18 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
     id: angle.id,
     label: angle.label,
     tag: angle.tag,
-    prompt: promptFor(angle, []),
+    prompt: promptFor(angle, [], 0),
   }))
 
   const captionsFor = (group: Product[]) => group.map((product) => ai.captions[product.id] ?? '')
   const comboPrompts: Record<string, Record<string, string>> = {}
   const described = groups.some((group) => captionsFor(group).some((text) => text.trim()))
-  if (described || Object.keys(ai.writtenPrompts).length) {
+  // A mixed backdrop varies per combo too, so it needs per-combo prompts even
+  // when nothing has been described.
+  if (described || ai.background === MIXED_BACKGROUND || Object.keys(ai.writtenPrompts).length) {
     combos.forEach((combo, index) => {
       const products = captionsFor(groups[index])
-      combo.prompts = Object.fromEntries(chosen.map((angle) => [angle.id, promptFor(angle, products)]))
+      combo.prompts = Object.fromEntries(chosen.map((angle) => [angle.id, promptFor(angle, products, index)]))
       comboPrompts[combo.folder] = combo.prompts
     })
   }
@@ -1398,3 +1649,5 @@ fetchConfig()
   .finally(renderAiControls)
 
 refresh()
+
+void refreshTemplates()

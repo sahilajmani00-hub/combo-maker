@@ -23,6 +23,7 @@ import { estimate, probeModels, readCredentials, verifyCredentials, writeCredent
 import * as airun from './airun.mjs'
 import * as openrouter from './openrouter.mjs'
 import * as queue from './queue.mjs'
+import * as templates from './templates.mjs'
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const dist = join(root, 'dist')
@@ -213,6 +214,40 @@ async function configPayload() {
   }
 }
 
+/** Saved setups, so a refresh is not the end of an afternoon's work. */
+async function handleTemplates(request, response, pathname, method) {
+  try {
+    if (pathname === '/api/templates' && method === 'GET') {
+      sendJson(response, 200, { templates: templates.listTemplates(root) })
+      return true
+    }
+
+    if (pathname === '/api/templates' && method === 'POST') {
+      const saved = templates.saveTemplate(root, await readJson(request))
+      sendJson(response, 200, { saved, templates: templates.listTemplates(root) })
+      return true
+    }
+
+    const match = /^\/api\/templates\/([\w-]+)(\/delete)?$/.exec(pathname)
+    if (match && !match[2] && method === 'GET') {
+      sendJson(response, 200, templates.loadTemplate(root, match[1]))
+      return true
+    }
+    if (match && match[2] && method === 'POST') {
+      templates.deleteTemplate(root, match[1])
+      sendJson(response, 200, { templates: templates.listTemplates(root) })
+      return true
+    }
+
+    sendJson(response, 404, { error: 'Unknown template route.' })
+    return true
+  } catch (error) {
+    sendJson(response, error.expected ? 400 : 500, { error: error.message })
+    if (!error.expected) console.error(`  Template error on ${pathname}:`, error)
+    return true
+  }
+}
+
 /** The queue the browser extension reads while you work on higgsfield.ai. */
 async function handleQueue(request, response, pathname, method) {
   try {
@@ -301,6 +336,7 @@ async function handleApi(request, response, pathname) {
   }
 
   if (pathname.startsWith('/api/queue')) return handleQueue(request, response, pathname, method)
+  if (pathname.startsWith('/api/templates')) return handleTemplates(request, response, pathname, method)
 
   const runMatch = /^\/api\/ai\/runs\/([\w-]+)(\/cancel)?$/.exec(pathname)
 

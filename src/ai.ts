@@ -172,6 +172,34 @@ export const writePrompts = (payload: {
   angles: { id: string; label: string; camera: string }[]
 }) => request<{ model: string; written: WrittenPrompt[] }>('/api/ai/write-prompts', postJson(payload))
 
+export type TemplateSummary = { id: string; name: string; savedAt: string | null; productCount: number }
+
+export type TemplateDetail = {
+  id: string
+  name: string
+  savedAt: string | null
+  settings: Record<string, unknown>
+  products: { name: string; type: string; data: string }[]
+}
+
+export const listTemplates = () => request<{ templates: TemplateSummary[] }>('/api/templates')
+
+export const saveTemplate = (payload: {
+  name: string
+  products: { name: string; type: string; data: string }[]
+  settings: Record<string, unknown>
+}) => request<{ templates: TemplateSummary[] }>('/api/templates', postJson(payload))
+
+export const loadTemplate = (id: string) => request<TemplateDetail>(`/api/templates/${id}`)
+
+export const deleteTemplate = (id: string) =>
+  request<{ templates: TemplateSummary[] }>(`/api/templates/${id}/delete`, postJson({}))
+
+/** The original file bytes, so saving a template never re-encodes a photo. */
+export function fileToBase64(file: File): Promise<string> {
+  return blobToBase64(file, file.name)
+}
+
 export type Estimate = { credits: number; usd: number }
 
 /** Cost of a single generation with these settings, straight from the API. */
