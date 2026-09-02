@@ -14,12 +14,13 @@ import {
 } from './compose.ts'
 import { createZip, type ZipEntry } from './zip.ts'
 import { comboFolder, comboName } from './naming.ts'
-import { MAX_COMBOS, buildGroups, countGroups, minimumImages, type GroupMode } from './grouping.ts'
+import { buildGroups, minimumImages, type GroupMode } from './grouping.ts'
 import {
   AI_BACKGROUNDS,
   ANGLES,
   DEFAULT_ANGLES,
   MIXED_BACKGROUND,
+  WHITE_BACKDROP,
   angleById,
   backdropFor,
   buildPrompt,
@@ -42,7 +43,9 @@ import {
   loadTemplate,
   saveCredentials,
   saveTemplate,
-  sendQueue,
+  appendQueue,
+  beginQueue,
+  finishQueue,
   saveDescribeKey,
   startRun,
   toReference,
@@ -92,6 +95,8 @@ const ai = {
   angles: [...DEFAULT_ANGLES] as AngleId[],
   subject: 'earrings',
   background: AI_BACKGROUNDS[0].id,
+  /** Marketplaces want the first listing image on plain white; the rest sell. */
+  whiteFirst: false,
   ratio: '1:1',
   model: 'soul-reference',
   resolution: '1080p',
@@ -138,6 +143,18 @@ const plural = (count: number, word: string) => `${count} ${word}${count === 1 ?
 
 function comboGroups(): Product[][] {
   return buildGroups(state.products, state.comboSize, state.mode)
+}
+
+/**
+ * The surface for one shot.
+ *
+ * A listing's first image usually has to be plain white to be accepted, while
+ * the images after it are what actually sell — so the hero angle can opt out of
+ * the chosen backdrop while everything else keeps it.
+ */
+function backdropForShot(comboIndex: number, angleIndex: number): string {
+  if (ai.whiteFirst && angleIndex === 0) return WHITE_BACKDROP
+  return backdropFor(ai.background, comboIndex)
 }
 
 function selectedModel() {
@@ -322,6 +339,7 @@ app.innerHTML = `
           <span class="field-label">Backdrop</span>
           <div id="ai-background-options" class="chip-row"></div>
         </div>
+        <label class="toggle"><input id="ai-white-first" type="checkbox"><span><b>First angle on plain white</b>The hero shot every marketplace wants, with the remaining angles on the backdrop above.</span></label>
         <div class="field">
           <span class="field-label">Frame</span>
           <div id="ai-ratio-options" class="chip-row"></div>
@@ -465,16 +483,12 @@ function renderControls() {
   el('#size-label').textContent = `${RATIOS[state.ratio].width} × ${RATIOS[state.ratio].height}`
 
   const groups = comboGroups()
-  const possible = countGroups(state.products.length, state.comboSize, state.mode)
-  const capped = possible > groups.length
   const leftover = state.mode === 'sequential'
     ? state.products.length - groups.length * state.comboSize
     : 0
 
   el('#combo-count').textContent = groups.length
-    ? capped
-      ? `${groups.length} of ${possible}`
-      : `${groups.length}${leftover ? ` (+${leftover} spare)` : ''}`
+    ? `${groups.length}${leftover ? ` (+${leftover} spare)` : ''}`
     : '—'
 
   generateButton.disabled = busy || groups.length === 0
@@ -486,9 +500,6 @@ function renderControls() {
     hint.textContent = `Add at least ${plural(needed, 'product image')} to continue.`
   } else if (!groups.length) {
     hint.textContent = `Add ${plural(needed - state.products.length, 'more image')} to complete a set of ${state.comboSize}.`
-  } else if (capped) {
-    hint.className = 'hint error'
-    hint.textContent = `${possible} combinations possible — only the first ${MAX_COMBOS} will be built.`
   } else if (state.mode === 'combinations') {
     hint.textContent = `${plural(groups.length, 'combo')} — every set of ${state.comboSize} from your ${state.products.length} images.`
   } else if (state.mode === 'repeats') {
@@ -563,6 +574,7 @@ function currentSettings(): Record<string, unknown> {
       folderName: ai.folderName,
       describeModel: ai.describeModel,
       promptModel: ai.promptModel,
+      whiteFirst: ai.whiteFirst,
       writtenPrompts: ai.writtenPrompts,
       // Captions are keyed by product id, which is reassigned on load, so they
       // travel by position instead.
@@ -591,6 +603,7 @@ function applySettings(settings: Record<string, unknown>) {
   ai.folderName = (saved.folderName as string) ?? ai.folderName
   ai.describeModel = (saved.describeModel as string) ?? ai.describeModel
   ai.promptModel = (saved.promptModel as string) ?? ai.promptModel
+  ai.whiteFirst = Boolean(saved.whiteFirst)
   ai.writtenPrompts = (saved.writtenPrompts as Record<string, string>) ?? {}
   ai.captions = {}
   state.products.forEach((product, index) => {
@@ -608,6 +621,7 @@ function applySettings(settings: Record<string, unknown>) {
   el<HTMLInputElement>('#trim-input').checked = state.trim
   el<HTMLInputElement>('#uniform-input').checked = state.uniformScale
   el<HTMLInputElement>('#baseline-input').checked = state.align === 'bottom'
+  el<HTMLInputElement>('#ai-white-first').checked = ai.whiteFirst
   el<HTMLInputElement>('#ai-concurrency').value = String(ai.concurrency)
   el('#ai-concurrency-value').textContent = String(ai.concurrency)
 }
@@ -1017,6 +1031,20 @@ async function refreshEstimate() {
   renderAiControls()
 }
 
+/**
+ * A message from something the user just did.
+ *
+ * `renderAiControls` rewrites the hint from scratch every time it runs, so an
+ * action that sets the hint and then re-renders would erase its own result.
+ * Actions park the message here instead and the renderer gives it priority.
+ */
+let notice: { text: string; error: boolean } | null = null
+
+function say(text: string, error = false) {
+  notice = { text, error }
+  renderAiControls()
+}
+
 const runActive = () => ai.run !== null && (ai.run.status === 'preparing' || ai.run.status === 'running')
 
 function renderAiControls() {
@@ -1107,6 +1135,13 @@ function renderAiControls() {
   el<HTMLButtonElement>('#ai-queue-button').disabled =
     ai.starting || ai.queueing || !groups.length || !ai.angles.length
 
+  if (notice) {
+    aiHint.className = notice.error ? 'hint error' : 'hint'
+    aiHint.textContent = notice.text
+    notice = null
+    return
+  }
+
   aiHint.className = 'hint'
   if (ai.starting) {
     aiHint.textContent = 'Preparing your reference photos...'
@@ -1125,7 +1160,7 @@ function renderAiControls() {
     aiHint.textContent = 'Tick at least one camera angle.'
   } else if (jobs > maxJobs) {
     aiHint.className = 'hint error'
-    aiHint.textContent = `${jobs} images is over the ${maxJobs} per-run limit — pick fewer angles or a smaller set.`
+    aiHint.textContent = `${jobs} images is over the ${maxJobs} limit for a paid run — pick fewer angles, or use Send to extension, which has no cap.`
   } else {
     const via = model?.references === 'one'
       ? ' Each combo is composited on canvas first, exactly as the Canvas tab shows it, then re-shot.'
@@ -1301,16 +1336,26 @@ el('#ai-write-button').addEventListener('click', async () => {
       model: ai.promptModel,
       subject: ai.subject,
       count: state.comboSize,
-      backdrop: ai.background === 'auto'
-        ? 'your choice — pick an elegant, real surface that suits these particular pieces'
-        : ai.background === MIXED_BACKGROUND
-          ? 'varies per image — describe a real, textured, coloured studio surface generically (never white sweep) and let each shot differ'
-          : ai.background,
+      backdrop: ai.background,
       aspectRatio: ai.ratio,
       extra: ai.extra,
-      angles: ai.angles.map((id) => {
+      // Each angle carries its own surface, so the hero shot can be plain white
+      // while the rest use the chosen backdrop.
+      angles: ai.angles.map((id, angleIndex) => {
         const angle = angleById(id)
-        return { id: angle.id, label: angle.label, camera: angle.camera }
+        const white = ai.whiteFirst && angleIndex === 0
+        return {
+          id: angle.id,
+          label: angle.label,
+          camera: angle.camera,
+          backdrop: white
+            ? 'plain clean seamless white — a marketplace hero image, bright and uncluttered'
+            : ai.background === 'auto'
+              ? 'your choice — one simple, real surface that suits these particular pieces, nothing else in the scene'
+              : ai.background === MIXED_BACKGROUND
+                ? 'varies per image — describe one simple, real, textured coloured studio surface generically (never a white sweep, no props) and let each shot differ'
+                : ai.background,
+        }
       }),
     })
     ai.writtenPrompts = {}
@@ -1357,6 +1402,13 @@ el('#ai-connection').addEventListener('click', () => {
   if (ai.config?.fromEnvironment) return
   ai.showConnect = !ai.showConnect
   renderAiControls()
+})
+
+el<HTMLInputElement>('#ai-white-first').addEventListener('change', (event) => {
+  ai.whiteFirst = (event.target as HTMLInputElement).checked
+  // Written prompts bake the backdrop in, so they no longer match.
+  if (Object.keys(ai.writtenPrompts).length) ai.writtenPrompts = {}
+  refresh()
 })
 
 el<HTMLInputElement>('#ai-subject').addEventListener('input', (event) => {
@@ -1487,7 +1539,7 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
 
   // An AI-written prompt is a template with a slot; the built-in one is
   // assembled outright. Either way the products for this combo go in.
-  const promptFor = (angle: ReturnType<typeof angleById>, products: string[], comboIndex: number) => {
+  const promptFor = (angle: ReturnType<typeof angleById>, products: string[], comboIndex: number, angleIndex: number) => {
     const written = ai.writtenPrompts[angle.id]
     if (written) return fillProducts(written, products, state.comboSize, ai.subject)
     return buildPrompt({
@@ -1496,7 +1548,7 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
       angle,
       // "Mixed" gives each combo its own surface, so the set does not come back
       // as forty variations of the same shot.
-      background: backdropFor(ai.background, comboIndex),
+      background: backdropForShot(comboIndex, angleIndex),
       extra: ai.extra,
       composite: single,
       products,
@@ -1506,11 +1558,11 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
   const chosen = ai.angles.map(angleById)
   // Without descriptions one prompt per angle covers every combo; with them
   // the prompt names this combo's own products, so it is per combo as well.
-  const angles = chosen.map((angle) => ({
+  const angles = chosen.map((angle, index) => ({
     id: angle.id,
     label: angle.label,
     tag: angle.tag,
-    prompt: promptFor(angle, [], 0),
+    prompt: promptFor(angle, [], 0, index),
   }))
 
   const captionsFor = (group: Product[]) => group.map((product) => ai.captions[product.id] ?? '')
@@ -1521,7 +1573,9 @@ async function buildPayload(groups: Product[][], report: (text: string) => void)
   if (described || ai.background === MIXED_BACKGROUND || Object.keys(ai.writtenPrompts).length) {
     combos.forEach((combo, index) => {
       const products = captionsFor(groups[index])
-      combo.prompts = Object.fromEntries(chosen.map((angle) => [angle.id, promptFor(angle, products, index)]))
+      combo.prompts = Object.fromEntries(
+        chosen.map((angle, angleIndex) => [angle.id, promptFor(angle, products, index, angleIndex)]),
+      )
       comboPrompts[combo.folder] = combo.prompts
     })
   }
@@ -1589,6 +1643,19 @@ async function startAiRun() {
  * Nothing is submitted anywhere — the reference images and prompts land on disk
  * and the extension reads them from the launcher while you work.
  */
+/** Combos per request when sending a queue. */
+const QUEUE_BATCH = 150
+
+/**
+ * Builds the same batch as a run, but stops at the folder.
+ *
+ * Nothing is submitted anywhere — the reference images and prompts land on disk
+ * and the extension reads them from the launcher while you work.
+ *
+ * Sent in batches because there is no cap on combos any more: 20 photos in
+ * fours is 4,845 of them, and compositing all of those before sending anything
+ * would exhaust the tab's memory and blow past any request size limit.
+ */
 async function sendToExtension() {
   const groups = comboGroups()
   if (!groups.length || !ai.angles.length) return
@@ -1596,12 +1663,30 @@ async function sendToExtension() {
   ai.queueing = true
   renderAiControls()
   const label = el('#ai-queue-text')
+  let message: { text: string; error: boolean } | null = null
   try {
-    const { single, images, combos, angles, comboPrompts } = await buildPayload(groups, (text) => {
-      label.textContent = text
-    })
-    label.textContent = 'Writing the folder...'
-    ai.queue = await sendQueue({
+    const single = selectedModel()?.references === 'one'
+    const usedFolders = new Set<string>()
+    const names = groups.map((group) => comboFolder(group.map((product) => product.file.name), usedFolders))
+    const chosen = ai.angles.map(angleById)
+    const captionsFor = (group: Product[]) => group.map((product) => ai.captions[product.id] ?? '')
+
+    const promptFor = (angle: ReturnType<typeof angleById>, products: string[], comboIndex: number, angleIndex: number) => {
+      const written = ai.writtenPrompts[angle.id]
+      if (written) return fillProducts(written, products, state.comboSize, ai.subject)
+      return buildPrompt({
+        subject: ai.subject,
+        count: state.comboSize,
+        angle,
+        background: backdropForShot(comboIndex, angleIndex),
+        extra: ai.extra,
+        composite: single,
+        products,
+      })
+    }
+
+    label.textContent = 'Starting...'
+    await beginQueue({
       outputRoot: ai.outputRoot.trim(),
       folderName: ai.folderName.trim() || defaultFolderName(state.comboSize),
       subject: ai.subject,
@@ -1610,20 +1695,71 @@ async function sendToExtension() {
       aspectRatio: ai.ratio,
       resolution: ai.resolution,
       single,
-      images,
-      combos,
-      angles,
-      comboPrompts,
+      angles: chosen.map((angle, angleIndex) => ({
+        id: angle.id,
+        label: angle.label,
+        tag: angle.tag,
+        prompt: promptFor(angle, [], 0, angleIndex),
+      })),
     })
-    aiHint.className = 'hint'
-    aiHint.textContent = `${plural(ai.queue.items.length, 'image')} queued in ${ai.queue.directory} — open the extension on higgsfield.ai.`
+
+    for (let start = 0; start < groups.length; start += QUEUE_BATCH) {
+      const slice = groups.slice(start, start + QUEUE_BATCH)
+      const images: { id: number; type: string; data: string }[] = []
+      const combos: (RunRequest['combos'][number] & { prompts?: Record<string, string> })[] = []
+
+      for (const [offset, group] of slice.entries()) {
+        const index = start + offset
+        label.textContent = `Compositing ${index + 1} of ${groups.length}...`
+        // Yield so the label paints between combos on a long run.
+        await new Promise((resolve) => setTimeout(resolve, 0))
+
+        const products = captionsFor(group)
+        const prompts = Object.fromEntries(
+          chosen.map((angle, angleIndex) => [angle.id, promptFor(angle, products, index, angleIndex)]),
+        )
+
+        if (single) {
+          const canvas = await compositeReference(group)
+          images.push({ id: index + 1, ...(await canvasToReference(canvas, names[index])) })
+          combos.push({ folder: names[index], imageIds: [index + 1], sourceNames: group.map((p) => p.file.name), prompts })
+        } else {
+          combos.push({
+            folder: names[index],
+            imageIds: group.map((product) => product.id),
+            sourceNames: group.map((product) => product.file.name),
+            prompts,
+          })
+        }
+      }
+
+      // Multi-reference mode shares the product photos across every combo, so
+      // they go up once with the first batch and are reused after that.
+      if (!single && start === 0) {
+        const used = new Set(groups.flat().map((product) => product.id))
+        images.push(
+          ...(await Promise.all(
+            state.products
+              .filter((product) => used.has(product.id))
+              .map(async (product) => ({ id: product.id, ...(await toReference(product.file)) })),
+          )),
+        )
+      }
+
+      label.textContent = `Sending ${Math.min(start + QUEUE_BATCH, groups.length)} of ${groups.length}...`
+      await appendQueue({ images, combos })
+    }
+
+    label.textContent = 'Finishing...'
+    ai.queue = await finishQueue()
+    message = { text: `${plural(ai.queue.items.length, 'image')} queued in ${ai.queue.directory} — open the extension on higgsfield.ai.`, error: false }
   } catch (error) {
-    aiHint.className = 'hint error'
-    aiHint.textContent = error instanceof Error ? error.message : 'Could not build that queue.'
+    message = { text: error instanceof Error ? error.message : 'Could not build that queue.', error: true }
   } finally {
     ai.queueing = false
     label.textContent = 'Send to extension'
-    renderAiControls()
+    if (message) say(message.text, message.error)
+    else renderAiControls()
   }
 }
 

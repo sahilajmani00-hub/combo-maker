@@ -161,6 +161,22 @@ export type QueueRequest = {
 /** Hands the batch to the launcher for the browser extension to work through. */
 export const sendQueue = (payload: QueueRequest) => request<QueueSummary>('/api/queue', postJson(payload))
 
+/**
+ * The same, in pieces.
+ *
+ * Composites are heavy, so a few hundred combos would not fit in one request —
+ * begin, append a batch at a time, then finish.
+ */
+export const beginQueue = (payload: Omit<QueueRequest, 'images' | 'combos' | 'comboPrompts'>) =>
+  request<{ folder: string; directory: string }>('/api/queue/begin', postJson(payload))
+
+export const appendQueue = (batch: {
+  images: { id: number; type: string; data: string }[]
+  combos: (RunRequest['combos'][number] & { prompts?: Record<string, string> })[]
+}) => request<{ combos: number; items: number }>('/api/queue/append', postJson(batch))
+
+export const finishQueue = () => request<QueueSummary>('/api/queue/finish', postJson({}))
+
 /** Has a top model write one prompt per camera angle, products left as a slot. */
 export const writePrompts = (payload: {
   model: string
@@ -169,7 +185,9 @@ export const writePrompts = (payload: {
   backdrop: string
   aspectRatio: string
   extra: string
-  angles: { id: string; label: string; camera: string }[]
+  // Each angle carries its own backdrop: the hero shot is usually plain white
+  // while the rest are lifestyle surfaces.
+  angles: { id: string; label: string; camera: string; backdrop: string }[]
 }) => request<{ model: string; written: WrittenPrompt[] }>('/api/ai/write-prompts', postJson(payload))
 
 export type TemplateSummary = { id: string; name: string; savedAt: string | null; productCount: number }
@@ -241,11 +259,33 @@ export async function toReference(file: File): Promise<{ type: string; data: str
 }
 
 /**
+ * Longest edge of a composited reference.
+ *
+ * The composite is only ever an instruction to the image model — it is never
+ * the output — so full canvas resolution buys nothing and costs a great deal:
+ * encoding and base64-ing hundreds of 1200px JPEGs is what makes a big queue
+ * slow to send. 900px keeps every design clearly legible at a fraction of the
+ * bytes and the encode time.
+ */
+const REFERENCE_MAX_EDGE = 900
+
+/**
  * The same, for a combo already composited on canvas — what single-reference
  * models get instead of the products one by one.
  */
 export async function canvasToReference(canvas: HTMLCanvasElement, label: string) {
-  const blob = await canvasToBlob(canvas, 'image/jpeg', 0.92)
+  const scale = Math.min(1, REFERENCE_MAX_EDGE / Math.max(canvas.width, canvas.height))
+  let source = canvas
+  if (scale < 1) {
+    const smaller = document.createElement('canvas')
+    smaller.width = Math.round(canvas.width * scale)
+    smaller.height = Math.round(canvas.height * scale)
+    const context = smaller.getContext('2d')!
+    context.imageSmoothingQuality = 'high'
+    context.drawImage(canvas, 0, 0, smaller.width, smaller.height)
+    source = smaller
+  }
+  const blob = await canvasToBlob(source, 'image/jpeg', 0.88)
   return { type: 'image/jpeg', data: await blobToBase64(blob, label) }
 }
 

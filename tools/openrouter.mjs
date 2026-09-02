@@ -60,11 +60,11 @@ const MAX_TOKENS = 700
  * Kept short on purpose: this text is pasted into every prompt it appears in.
  */
 const SYSTEM = [
-  'You describe a single piece of jewellery for a catalogue.',
+  'You describe ONE catalogue product from its photo. The product may be a single piece, a matching pair, or a multi-piece set — describe it as one product, and if it is a pair or set say so and say how many pieces it has.',
   'Reply with ONE noun phrase of at most 20 words describing its shape, silhouette, construction, components, motif and style.',
   'Never mention colour, metal tone, plating or finish, and avoid material names that imply a colour - no gold, silver, rose gold, pearl, jet, ivory, diamond.',
   'Say "sphere", "bead", "cabochon" or "faceted stone" instead of naming the material.',
-  'Example: "long tiered chandelier earring with a teardrop centre stone and fringed lower row".',
+  'Examples: "long tiered chandelier earring with a teardrop centre stone and fringed lower row"; "matching pair of wide hinged huggie hoops with paved stones"; "set of six graduated stud pairs in ascending size".',
   'No sentences, no preamble, no punctuation at the end, no marketing language.',
 ].join(' ')
 
@@ -91,14 +91,18 @@ export const PRODUCTS_TOKEN = '{{PRODUCTS}}'
 
 const PROMPT_SYSTEM = [
   'You write prompts for an AI product photographer. The output is a marketplace listing image — Amazon, Flipkart, Meesho — where the job is to stop a shopper scrolling and read clearly at thumbnail size.',
-  'You are given the product type, a camera angle, a backdrop and an aspect ratio. Write ONE prompt for that shot.',
+  'You are given the product type, how many products share the frame, a camera angle, a backdrop and an aspect ratio. Write ONE prompt for that shot.',
+  '',
+  'CRITICAL, and there are two opposite mistakes to rule out. (1) With jewellery an image model reads "2 earrings" as the left and right of one design, and returns a single product photographed twice. (2) Over-correcting for that, it splits a product that is genuinely sold as a pair or a set into separate items. Each reference is ONE product — possibly a single piece, possibly a matching pair, possibly a multi-piece set. Your prompt must say that the frame holds several DIFFERENT products, that each is reproduced whole and exactly once, that a product which is a pair or set stays together as one unit, and that no product may be duplicated, split, merged or given an invented matching partner.',
   '',
   'The prompt you write MUST:',
   `- contain the literal token ${PRODUCTS_TOKEN} exactly once, on its own line, where the list of products in the frame will be inserted;`,
   '- instruct that colour, metal tone, plating, stone colour and finish are taken from the reference image and never invented from the text;',
   '- instruct that no product may be redesigned, recoloured, merged, duplicated, or added;',
   '- forbid text, logos, watermarks, hands and people;',
-  '- describe lighting, composition, spacing, depth of field and surface treatment concretely enough to be reproducible.',
+  '- describe lighting, composition, spacing, depth of field and surface treatment concretely enough to be reproducible;',
+  '- require clear separation between the products — no overlapping or crowding — while the pieces of one product stay grouped as a unit, all at true relative scale;',
+  '- call for fine detail to resolve: stones and settings, metal grain and polish, joins and clasps.',
   '',
   'Aim for a clean, bright, high-contrast commercial result that stays legible as a small thumbnail: the products fill the frame confidently, edges stay crisp, shadows stay soft and shallow.',
   'Write 90-160 words of plain declarative sentences. No headings, no bullet points, no markdown, no preamble, no commentary — output only the prompt itself.',

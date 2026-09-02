@@ -110,6 +110,9 @@ export function angleById(id: AngleId): Angle {
  */
 export const AUTO_BACKGROUND = 'auto'
 
+/** Plain white — what most marketplaces require of a listing's first image. */
+export const WHITE_BACKDROP = 'clean seamless white'
+
 /** Every combo gets a different surface from SCENE_BACKDROPS. */
 export const MIXED_BACKGROUND = 'mixed'
 
@@ -192,9 +195,18 @@ export type PromptOptions = {
  */
 export function buildPrompt({ subject, count, angle, background, extra, composite, products }: PromptOptions): string {
   const item = subject.trim() || 'products'
+  /**
+   * The distinct-designs wording is the whole ballgame for jewellery.
+   *
+   * "2 earrings" reads to an image model as a pair — the left and right of one
+   * design — which is exactly what it returns: one product photographed twice.
+   * A combo is the opposite: several different designs sharing a frame, one
+   * piece from each. It has to be stated outright and repeated as a negative,
+   * or the pair reading wins every time.
+   */
   const source = composite
-    ? `The reference image is a flat layout of ${count} separate ${item}. Re-photograph all ${count} of them together in one frame as real objects.`
-    : `The ${count} reference images are ${count} separate ${item}. Photograph all ${count} of them together in one frame.`
+    ? `The reference image is a flat working layout holding all ${count} products side by side. Re-photograph every one of them together in a single frame as real objects.`
+    : `The ${count} reference images are ${count} different products, one per image. Photograph all ${count} of them together in a single frame.`
   const described = products.map((text) => text.trim()).filter(Boolean)
   const white = background === 'clean seamless white'
 
@@ -213,20 +225,28 @@ export function buildPrompt({ subject, count, angle, background, extra, composit
   // "Classy (auto)" hands the choice over instead of naming a surface, with
   // enough of a brief that it stays a product shot rather than a still life.
   const backdrop = background === AUTO_BACKGROUND
-    ? 'Set the pieces on an elegant surface chosen to suit them — draped silk, velvet, brushed stone, fine linen or polished wood — in a colour that flatters the jewellery and keeps it the clear subject. Arrange them with even spacing and consistent scale.'
-    : `Set the pieces on ${background}. Arrange them with even spacing and consistent scale, the surface filling the frame behind and beneath them as a real environment.`
+    ? 'Set the pieces on one simple, real surface chosen to suit them — draped silk, velvet, brushed stone, fine linen or polished wood — in a colour that flatters the jewellery and keeps it the clear subject. Nothing else in the scene: no props, no scattering, no decoration. Arrange them with even spacing and consistent scale.'
+    : `Set the pieces on ${background}. Keep the setting simple and uncluttered — the surface alone, filling the frame behind and beneath them as a real physical environment, with nothing else placed in the scene. Arrange the products with even spacing and consistent scale.`
   const lines = [
-    `Professional studio product photograph showing exactly ${count} ${item} together in one frame.`,
+    `Professional studio product photograph of exactly ${count} DIFFERENT ${item}, shown together in one frame as ${count} separate products.`,
+    // A reference is one product — one thing a shopper buys — and that may be a
+    // single piece, a matching pair, or a multi-piece set. Splitting a set into
+    // its parts is as wrong as duplicating a design into a fake pair, so both
+    // are ruled out explicitly and separately.
+    `Each reference is ONE product. Reproduce every product exactly as its reference shows it and keep it whole: if a product is itself a matching pair or a multi-piece set, show all of its pieces together as that single unit — never split a product apart and never show only part of one.`,
+    `The ${count} products must be visibly different from one another. Never duplicate a product to pad the frame, never invent a matching partner for a product that is shown singly, never merge two products into one, and never drop one — exactly ${count} distinct products, no more and no fewer.`,
     source,
   ]
   if (described.length) {
-    lines.push(`Shapes only, for identification — colours come from the image: ${described.map((text, index) => `(${index + 1}) ${text}`).join('; ')}.`)
+    lines.push(`The ${described.length} products, shapes only — colours come from the image: ${described.map((text, index) => `(${index + 1}) ${text}`).join('; ')}. Each appears exactly once, whole, and clearly distinguishable from the others.`)
   }
   lines.push(
     ignoreReferenceGround,
     `Camera: ${angle.camera}.`,
     `Take the exact colour, metal tone, plating, stone colour and finish of every product from the reference image — match what you see there precisely, and never infer them from this text. Shape, texture and proportions must match the reference too. Do not redesign, recolour, merge or duplicate any product, and do not add a product that is not in the reference.`,
     backdrop,
+    `Give each product enough space and separation that its silhouette is unmistakable — no overlapping and no crowding between products — while the pieces belonging to one product stay grouped together as an obvious unit. Keep all products at true relative scale to one another.`,
+    `Resolve fine detail: individual stones and their settings, metal grain and polish, engraving, joins and clasps, fabric or thread where present. Every design must be identifiable at a glance and hold up when zoomed in.`,
     realism,
     `No text, no logos, no watermarks, no hands, no people. Nothing added to the scene beyond the surface described.`,
   )

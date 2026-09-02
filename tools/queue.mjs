@@ -29,6 +29,16 @@ const EXTENSION_BY_TYPE = {
 
 let active = null
 
+/**
+ * A queue being assembled batch by batch.
+ *
+ * Composited references are the bulk of a queue's bytes — a few hundred
+ * kilobytes each — so a large run cannot arrive as one request without holding
+ * the whole thing in memory twice. The browser sends it in pieces instead, and
+ * each piece is written to disk as it lands.
+ */
+let draft = null
+
 function safeSegment(value, fallback) {
   const cleaned = String(value ?? '')
     .replace(ILLEGAL_SEGMENT, '')
@@ -100,81 +110,115 @@ export function restore(root) {
 
 /* ---------------- building ---------------- */
 
-export function createQueue(root, options) {
-  const images = Array.isArray(options.images) ? options.images : []
-  const combos = Array.isArray(options.combos) ? options.combos : []
+/** Opens a queue and prepares its folder; combos arrive afterwards. */
+export function beginQueue(root, options) {
   const angles = Array.isArray(options.angles) ? options.angles : []
-  if (!images.length) fail('No reference images were sent.')
-  if (!combos.length) fail('No combos to queue.')
   if (!angles.length) fail('Pick at least one camera angle.')
 
-  const directory = join(resolveRoot(root, options.outputRoot), safeSegment(options.folderName, 'AI combos'))
-  const referenceDirectory = join(directory, '_references')
+  const folder = safeSegment(options.folderName, 'AI combos')
+  const directory = join(resolveRoot(root, options.outputRoot), folder)
   try {
-    mkdirSync(referenceDirectory, { recursive: true })
+    mkdirSync(join(directory, '_references'), { recursive: true })
   } catch (error) {
-    fail(`Could not create ${referenceDirectory}: ${error.message}`)
+    fail(`Could not create ${directory}: ${error.message}`)
   }
 
-  // Combo folder names have to be unique for the same reason the run does it:
-  // two combos writing one reference file would silently lose one.
-  const usedFolders = new Set()
-  const safeCombos = combos.map((combo, index) => {
-    const base = safeSegment(combo.folder, `combo-${index + 1}`)
-    let name = base
-    let counter = 2
-    while (usedFolders.has(name.toLowerCase())) name = `${base}-${counter++}`
-    usedFolders.add(name.toLowerCase())
-    return { ...combo, folder: name }
-  })
-
-  // Every reference lands on disk under a name that says what it is, so the
-  // folder is usable on its own even with the extension closed.
-  const usedFiles = new Set()
-  const pathById = new Map()
-  safeCombos.forEach((combo, comboIndex) => {
-    for (const [slot, id] of (combo.imageIds ?? []).entries()) {
-      if (pathById.has(String(id))) continue
-      const image = images.find((entry) => String(entry.id) === String(id))
-      if (!image) continue
-      const extension = EXTENSION_BY_TYPE[image.type] ?? 'jpg'
-      // One composite per combo in single-reference mode; otherwise the product
-      // photo, which several combos will share.
-      const label = options.single
-        ? combo.folder
-        : safeSegment(combo.sourceNames?.[slot]?.replace(/\.[a-z0-9]+$/i, ''), `product-${comboIndex + 1}-${slot + 1}`)
-      let name = `${label}.${extension}`
-      let counter = 2
-      while (usedFiles.has(name.toLowerCase())) name = `${label}-${counter++}.${extension}`
-      usedFiles.add(name.toLowerCase())
-
-      writeFileSync(join(referenceDirectory, name), Buffer.from(String(image.data ?? ''), 'base64'))
-      pathById.set(String(id), `_references/${name}`)
-    }
-  })
-
-  const items = safeCombos.flatMap((combo) =>
-    angles.map((angle) => ({
-      id: `${combo.folder}::${angle.id}`,
-      combo: combo.folder,
-      angle: String(angle.label ?? angle.id),
-      tag: safeSegment(angle.tag, 'angle'),
-      // A described run has a prompt per combo; otherwise the angle's own.
-      prompt: String(options.comboPrompts?.[combo.folder]?.[angle.id] ?? angle.prompt ?? ''),
-      references: (combo.imageIds ?? []).map((id) => pathById.get(String(id))).filter(Boolean),
-      // Where the finished image should be saved, so the panel can tell you.
-      saveAs: `${combo.folder}/${combo.folder} - ${safeSegment(angle.tag, 'angle')}`,
-      status: 'pending',
+  draft = {
+    root,
+    directory,
+    folder,
+    single: Boolean(options.single),
+    meta: {
+      subject: String(options.subject ?? ''),
+      comboSize: Number(options.comboSize) || 0,
+      model: String(options.model ?? ''),
+      aspectRatio: String(options.aspectRatio ?? ''),
+      resolution: options.resolution ? String(options.resolution) : null,
+    },
+    angles: angles.map((angle, index) => ({
+      id: String(angle.id ?? `angle-${index + 1}`),
+      label: String(angle.label ?? angle.id ?? `Angle ${index + 1}`),
+      tag: safeSegment(angle.tag, `angle-${index + 1}`),
+      prompt: String(angle.prompt ?? ''),
     })),
-  )
+    items: [],
+    comboCount: 0,
+    usedFolders: new Set(),
+    usedFiles: new Set(),
+    // Spans batches: in multi-reference mode the product photos arrive with the
+    // first batch and are reused by every combo after it.
+    pathById: new Map(),
+  }
+  return { folder, directory }
+}
+
+/** Adds one batch of combos, writing their references straight to disk. */
+export function appendQueue(batch) {
+  if (!draft) fail('No queue is being built — start one first.')
+  const images = Array.isArray(batch.images) ? batch.images : []
+  const combos = Array.isArray(batch.combos) ? batch.combos : []
+
+  const { pathById } = draft
+  for (const combo of combos) {
+    const name = (() => {
+      const base = safeSegment(combo.folder, `combo-${draft.comboCount + 1}`)
+      let candidate = base
+      let counter = 2
+      while (draft.usedFolders.has(candidate.toLowerCase())) candidate = `${base}-${counter++}`
+      draft.usedFolders.add(candidate.toLowerCase())
+      return candidate
+    })()
+    draft.comboCount += 1
+
+    const references = []
+    for (const [slot, id] of (combo.imageIds ?? []).entries()) {
+      let reference = pathById.get(String(id))
+      if (!reference) {
+        const image = images.find((entry) => String(entry.id) === String(id))
+        if (!image) continue
+        const extension = EXTENSION_BY_TYPE[image.type] ?? 'jpg'
+        const label = draft.single
+          ? name
+          : safeSegment(combo.sourceNames?.[slot]?.replace(/\.[a-z0-9]+$/i, ''), `product-${slot + 1}`)
+        let file = `${label}.${extension}`
+        let counter = 2
+        while (draft.usedFiles.has(file.toLowerCase())) file = `${label}-${counter++}.${extension}`
+        draft.usedFiles.add(file.toLowerCase())
+        writeFileSync(join(draft.directory, '_references', file), Buffer.from(String(image.data ?? ''), 'base64'))
+        reference = `_references/${file}`
+        pathById.set(String(id), reference)
+      }
+      references.push(reference)
+    }
+
+    for (const angle of draft.angles) {
+      draft.items.push({
+        id: `${name}::${angle.id}`,
+        combo: name,
+        angle: angle.label,
+        tag: angle.tag,
+        prompt: String(combo.prompts?.[angle.id] ?? angle.prompt ?? ''),
+        references,
+        saveAs: `${name}/${name} - ${angle.tag}`,
+        status: 'pending',
+        sources: combo.sourceNames ?? [],
+      })
+    }
+  }
+  return { combos: draft.comboCount, items: draft.items.length }
+}
+
+/** Seals the queue: carries over finished items, writes it, makes it live. */
+export function finishQueue() {
+  if (!draft) fail('No queue is being built — start one first.')
+  if (!draft.items.length) fail('No combos were sent.')
 
   // Rebuilding into a folder that already has a queue must not silently throw
-  // away what has been finished — re-sending after a prompt tweak is a normal
-  // thing to do, and losing an afternoon of clicking to it would not be.
-  const previous = existsSync(queueFile(directory))
+  // away what has been finished — re-sending after a prompt tweak is normal.
+  const previous = existsSync(queueFile(draft.directory))
     ? (() => {
         try {
-          return JSON.parse(readFileSync(queueFile(directory), 'utf8'))
+          return JSON.parse(readFileSync(queueFile(draft.directory), 'utf8'))
         } catch {
           return null
         }
@@ -183,7 +227,7 @@ export function createQueue(root, options) {
   if (previous) {
     const before = new Map(previous.items.map((item) => [item.id, item.status]))
     let carried = 0
-    for (const item of items) {
+    for (const item of draft.items) {
       const status = before.get(item.id)
       if (status && status !== 'pending') {
         item.status = status
@@ -196,22 +240,34 @@ export function createQueue(root, options) {
   active = {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
-    directory,
-    folder: safeSegment(options.folderName, 'AI combos'),
-    subject: String(options.subject ?? ''),
-    comboSize: Number(options.comboSize) || 0,
-    comboCount: safeCombos.length,
-    model: String(options.model ?? ''),
-    aspectRatio: String(options.aspectRatio ?? ''),
-    resolution: options.resolution ? String(options.resolution) : null,
-    angles: angles.map((angle) => ({ id: String(angle.id), label: String(angle.label ?? angle.id) })),
-    items,
+    directory: draft.directory,
+    folder: draft.folder,
+    ...draft.meta,
+    comboCount: draft.comboCount,
+    angles: draft.angles.map((angle) => ({ id: angle.id, label: angle.label })),
+    items: draft.items,
   }
+  const root = draft.root
+  draft = null
 
   save()
   writePromptSheet(active)
-  writeFileSync(join(root, POINTER_FILE), directory, 'utf8')
+  writeFileSync(join(root, POINTER_FILE), active.directory, 'utf8')
   return active
+}
+
+/** One-shot build, for small queues and for tests. */
+export function createQueue(root, options) {
+  const images = Array.isArray(options.images) ? options.images : []
+  const combos = Array.isArray(options.combos) ? options.combos : []
+  if (!images.length) fail('No reference images were sent.')
+  if (!combos.length) fail('No combos to queue.')
+  beginQueue(root, options)
+  appendQueue({
+    images,
+    combos: combos.map((combo) => ({ ...combo, prompts: options.comboPrompts?.[combo.folder] })),
+  })
+  return finishQueue()
 }
 
 /* ---------------- reading and updating ---------------- */

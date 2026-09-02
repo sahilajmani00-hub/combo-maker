@@ -266,6 +266,20 @@ async function handleQueue(request, response, pathname, method) {
       return true
     }
 
+    // Large queues arrive in pieces: begin, append repeatedly, finish.
+    if (pathname === '/api/queue/begin' && method === 'POST') {
+      sendJson(response, 200, queue.beginQueue(root, await readJson(request)))
+      return true
+    }
+    if (pathname === '/api/queue/append' && method === 'POST') {
+      sendJson(response, 200, queue.appendQueue(await readJson(request)))
+      return true
+    }
+    if (pathname === '/api/queue/finish' && method === 'POST') {
+      sendJson(response, 200, queue.finishQueue())
+      return true
+    }
+
     if (pathname === '/api/queue/item' && method === 'POST') {
       const body = await readJson(request)
       const item = queue.setStatus(String(body.id ?? ''), String(body.status ?? 'pending'))
@@ -440,7 +454,7 @@ async function handleApi(request, response, pathname) {
             const prompt = await openrouter.writeAnglePrompt(key, model, {
               subject: body.subject,
               count: body.count,
-              backdrop: body.backdrop,
+              backdrop: angle.backdrop || body.backdrop,
               aspectRatio: body.aspectRatio,
               extra: body.extra,
               angleLabel: angle.label,

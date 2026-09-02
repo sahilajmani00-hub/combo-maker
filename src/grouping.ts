@@ -7,9 +7,6 @@
 
 export type GroupMode = 'combinations' | 'repeats' | 'sequential'
 
-/** How many combos to build before stopping, to protect memory and patience. */
-export const MAX_COMBOS = 150
-
 /** C(poolSize, choose) — exact for any pool this tool accepts. */
 export function countCombinations(poolSize: number, choose: number): number {
   if (choose <= 0 || poolSize < choose) return 0
@@ -69,8 +66,12 @@ export function countGroups(poolSize: number, size: number, mode: GroupMode): nu
  * `repeats`      — same, but a product may appear more than once in a combo
  *                  (6 photos, sets of 4 -> 126 combos).
  * `sequential`   — consecutive chunks; a remainder too small to fill a set is left out.
+ *
+ * There is no cap: 20 photos in fours is 4,845 combos and that is the caller's
+ * business, not this function's. `limit` is still there for anyone who wants
+ * one — the browser passes none.
  */
-export function buildGroups<T>(items: T[], size: number, mode: GroupMode, limit = MAX_COMBOS): T[][] {
+export function buildGroups<T>(items: T[], size: number, mode: GroupMode, limit = Infinity): T[][] {
   if (size <= 0 || items.length < minimumImages(size, mode)) return []
 
   if (mode === 'sequential') {
