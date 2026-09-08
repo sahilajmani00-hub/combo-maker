@@ -362,6 +362,97 @@ async function handleQueue(request, response, pathname, method) {
       return true
     }
 
+    // Surfaces and camera clauses, handed over by the dashboard because that is
+    // where the prompt wording lives. Offered on every load, so a queue built
+    // before this existed still gets the choice.
+    if (pathname === '/api/queue/wording' && method === 'POST') {
+      sendJson(response, 200, queue.setWording(await readJson(request)))
+      return true
+    }
+
+    // Which vision models can be asked to rewrite one image's prompt.
+    if (pathname === '/api/queue/models' && method === 'GET') {
+      sendJson(response, 200, {
+        models: openrouter.DESCRIBE_MODELS,
+        defaultModel: openrouter.DEFAULT_DESCRIBE_MODEL,
+        ready: Boolean(openrouter.readKey(root)),
+      })
+      return true
+    }
+
+    /**
+     * Has a model look at this item's own reference pictures and write its
+     * prompt from scratch.
+     *
+     * The pictures are read from disk here rather than sent up from the panel:
+     * the launcher already has them, and a composite is a few hundred kilobytes
+     * that has no business making a round trip through the browser.
+     */
+    if (pathname === '/api/queue/item/recreate' && method === 'POST') {
+      const key = openrouter.readKey(root)
+      if (!key) {
+        sendJson(response, 400, { error: 'Add an OpenRouter key in Combo Maker first — the AI tab, under Describe.' })
+        return true
+      }
+      const body = await readJson(request)
+      const files = queue.referencesFor(String(body.id ?? ''))
+      if (!files) {
+        sendJson(response, 404, { error: 'That queue item is gone.' })
+        return true
+      }
+      if (!files.length) {
+        sendJson(response, 400, { error: 'This item has no reference picture for a model to read.' })
+        return true
+      }
+      const model = openrouter.DESCRIBE_MODELS.some((entry) => entry.id === body.model)
+        ? body.model
+        : openrouter.DEFAULT_DESCRIBE_MODEL
+      const written = await openrouter.promptForCombo(key, model, {
+        images: files.map((file) => ({
+          data: readFileSync(file).toString('base64'),
+          type: MIME[extname(file).toLowerCase()] ?? 'image/jpeg',
+        })),
+        subject: queue.getQueue()?.subject,
+        count: queue.getQueue()?.comboSize,
+      })
+      sendJson(response, 200, queue.setWrittenPrompt(String(body.id), written, model))
+      return true
+    }
+
+    if (pathname === '/api/queue/item/prompt' && method === 'POST') {
+      const body = await readJson(request)
+      const item = queue.setPrompt(String(body.id ?? ''), body.prompt)
+      if (!item) {
+        sendJson(response, 404, { error: 'That queue item is gone.' })
+        return true
+      }
+      sendJson(response, 200, item)
+      return true
+    }
+
+    // Atmosphere — haze and the like — switched on for one image at a time.
+    if (pathname === '/api/queue/item/effect' && method === 'POST') {
+      const body = await readJson(request)
+      const item = queue.setEffect(String(body.id ?? ''), body.effect, Boolean(body.on))
+      if (!item) {
+        sendJson(response, 404, { error: 'That queue item is gone.' })
+        return true
+      }
+      sendJson(response, 200, item)
+      return true
+    }
+
+    if (pathname === '/api/queue/item/backdrop' && method === 'POST') {
+      const body = await readJson(request)
+      const item = queue.setBackdrop(String(body.id ?? ''), body.backdrop, body.colour)
+      if (!item) {
+        sendJson(response, 404, { error: 'That queue item is gone.' })
+        return true
+      }
+      sendJson(response, 200, item)
+      return true
+    }
+
     if (pathname === '/api/queue/clear' && method === 'POST') {
       sendJson(response, 200, { cleared: queue.clearQueue(root) })
       return true

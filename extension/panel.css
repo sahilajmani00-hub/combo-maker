@@ -48,6 +48,13 @@ header { display: flex; align-items: center; justify-content: space-between; mar
 .angle { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--orange); }
 textarea { width: 100%; border: 1px solid var(--line); background: #fff; padding: 8px; font: 11px/1.5 Menlo, Consolas, monospace; resize: vertical; }
 textarea:focus { outline: 2px solid var(--orange); outline-offset: -1px; }
+textarea.dirty { border-color: var(--orange); background: #fffaf6; }
+select { width: 100%; border: 1px solid var(--line); background: #fff; color: var(--ink); padding: 7px; font: inherit; }
+select:focus { outline: 2px solid var(--orange); outline-offset: -1px; }
+select:disabled { color: var(--muted); background: #f4f2ea; }
+.effects { margin-top: 9px; }
+.effects label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.effects input { accent-color: var(--orange); margin: 0; }
 
 .row { display: flex; gap: 6px; margin-top: 8px; }
 .row.nav { margin-top: 12px; }
@@ -58,6 +65,7 @@ textarea:focus { outline: 2px solid var(--orange); outline-offset: -1px; }
 .ghost:hover:not(:disabled) { border-color: var(--orange); color: var(--orange); }
 .ghost:disabled { opacity: .35; cursor: not-allowed; }
 #copy-prompt { width: 100%; margin-top: 8px; }
+.wide { width: 100%; margin-top: 6px; }
 .link { border: 0; background: transparent; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; padding: 6px 0; font-size: 11px; }
 .link:hover { color: var(--ink); }
 .link.danger:hover { color: #b4462a; }

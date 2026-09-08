@@ -41,14 +41,32 @@
           <button id="save-image" class="ghost">Save image</button>
         </div>
 
+        <div id="backdrop-row" class="hidden">
+          <label class="label" for="backdrop">Backdrop <span id="backdrop-note" class="angle"></span></label>
+          <select id="backdrop"></select>
+          <label class="label" for="colour">Colour <span id="colour-note" class="angle"></span></label>
+          <select id="colour"></select>
+          <div id="effects" class="effects"></div>
+        </div>
+
         <label class="label" for="prompt">Prompt <span id="angle" class="angle"></span></label>
-        <textarea id="prompt" readonly rows="9"></textarea>
+        <textarea id="prompt" rows="9" spellcheck="false"></textarea>
+        <div class="row">
+          <button id="save-prompt" class="ghost" disabled>Save prompt</button>
+          <button id="revert-prompt" class="ghost" disabled>Revert</button>
+        </div>
         <button id="copy-prompt" class="primary">Copy prompt</button>
+
+        <label class="label" for="reader">Rewrite from the picture <span id="reader-note" class="angle"></span></label>
+        <select id="reader"></select>
+        <button id="recreate" class="ghost wide">Let this model write the prompt</button>
 
         <p class="saveas">Save the result as <code id="saveas"></code></p>
         <p class="keys">
           <b>I</b> copy image · <b>C</b> copy prompt · then <b>&#8984;V</b> in the page<br>
-          <b>D</b> done · <b>S</b> skip · <b>U</b> undo · <b>&larr; &rarr;</b> move
+          <b>D</b> done · <b>K</b> skip · <b>U</b> undo · <b>&larr; &rarr;</b> move<br>
+          <b>E</b> edit the prompt · <b>Esc</b> leave the box (edits are kept)<br>
+          <b>R</b> have the model rewrite this prompt · <b>F</b> fog
         </p>
       </div>
 

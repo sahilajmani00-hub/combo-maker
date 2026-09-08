@@ -30,6 +30,18 @@ const EXTENSION_BY_TYPE = {
 let active = null
 
 /**
+ * The wording the launcher cannot write for itself.
+ *
+ * Surfaces and camera clauses live in the dashboard's prompt writer, not here,
+ * so the browser hands the finished sentences over and the launcher only ever
+ * slots them in. Kept at module level as well as on the queue so wording that
+ * arrives before any queue does is not lost.
+ */
+let backdrops = []
+let cameras = {}
+let templates = null
+
+/**
  * A queue being assembled batch by batch.
  *
  * Composited references are the bulk of a queue's bytes — a few hundred
@@ -89,7 +101,12 @@ function writePromptSheet(queue) {
       current = item.combo
       lines.push('', `## ${item.combo}`, `reference: ${item.references.join(', ')}`, '')
     }
-    lines.push(`--- ${item.angle} (${item.tag}) ---`, item.prompt, '')
+    const notes = [
+      item.surface ?? item.backdrop,
+      ...(item.effects ?? []),
+      item.writtenBy ? `written by ${item.writtenBy}` : item.edited ? 'edited' : '',
+    ].filter(Boolean)
+    lines.push(`--- ${item.angle} (${item.tag})${notes.length ? ` · ${notes.join(' · ')}` : ''} ---`, item.prompt, '')
   }
   writeFileSync(join(queue.directory, 'prompts.txt'), `${lines.join('\n')}\n`, 'utf8')
 }
@@ -102,6 +119,9 @@ export function restore(root) {
     const directory = readFileSync(pointer, 'utf8').trim()
     if (!directory || !existsSync(queueFile(directory))) return null
     active = JSON.parse(readFileSync(queueFile(directory), 'utf8'))
+    if (active.backdrops?.length) backdrops = active.backdrops
+    if (active.cameras) cameras = active.cameras
+    if (active.templates) templates = active.templates
     return active
   } catch {
     return null
@@ -225,16 +245,32 @@ export function finishQueue() {
       })()
     : null
   if (previous) {
-    const before = new Map(previous.items.map((item) => [item.id, item.status]))
+    const before = new Map(previous.items.map((item) => [item.id, item]))
     let carried = 0
+    let kept = 0
     for (const item of draft.items) {
-      const status = before.get(item.id)
-      if (status && status !== 'pending') {
-        item.status = status
+      const was = before.get(item.id)
+      if (!was) continue
+      if (was.status && was.status !== 'pending') {
+        item.status = was.status
         carried += 1
+      }
+      // A rewritten prompt is hand-made work; re-sending after a settings tweak
+      // should no more discard it than it discards the done flags.
+      if (was.edited || was.backdrop) {
+        item.basePrompt = item.prompt
+        item.prompt = was.prompt
+        if (was.edited) item.edited = true
+        if (was.backdrop) item.backdrop = was.backdrop
+        if (was.colour) item.colour = was.colour
+        if (was.surface) item.surface = was.surface
+        if (was.effects?.length) item.effects = was.effects
+        if (was.writtenBy) item.writtenBy = was.writtenBy
+        kept += 1
       }
     }
     if (carried) console.log(`  Queue rebuilt: kept ${carried} finished item(s) from the previous queue.`)
+    if (kept) console.log(`  Queue rebuilt: kept ${kept} hand-edited prompt(s).`)
   }
 
   active = {
@@ -245,6 +281,9 @@ export function finishQueue() {
     ...draft.meta,
     comboCount: draft.comboCount,
     angles: draft.angles.map((angle) => ({ id: angle.id, label: angle.label })),
+    backdrops,
+    cameras,
+    templates,
     items: draft.items,
   }
   const root = draft.root
@@ -282,6 +321,357 @@ export function setStatus(itemId, status) {
   if (!item) return null
   item.status = ['pending', 'done', 'skipped'].includes(status) ? status : 'pending'
   save()
+  return item
+}
+
+/* ---------------- per-image prompts ---------------- */
+
+/** The slots a written prompt leaves. Mirrors src/angles.ts. */
+const BACKDROP_TOKEN = '{{BACKDROP}}'
+const ANGLE_TOKEN = '{{ANGLE}}'
+
+/**
+ * Receives the surfaces and camera clauses from the dashboard.
+ *
+ * A queue built before this existed carries none of it, so the dashboard offers
+ * the wording every time it loads and the live queue picks it up — an afternoon
+ * already half-worked gets the feature without being rebuilt.
+ */
+export function setWording({ backdrops: list, angles, templates: parts }) {
+  const cleaned = (Array.isArray(list) ? list : [])
+    .filter((entry) => entry?.id && entry?.block && entry?.realism)
+    .map((entry) => ({
+      id: String(entry.id),
+      label: String(entry.label ?? entry.id),
+      value: String(entry.value ?? entry.id),
+      // Null for a surface that is a colour and nothing else, so there is
+      // nothing underneath it to recolour.
+      material: entry.material ? String(entry.material) : null,
+      block: String(entry.block),
+      realism: String(entry.realism),
+    }))
+  if (!cleaned.length) fail('That backdrop menu was empty.')
+  backdrops = cleaned
+
+  // Camera clauses, by angle id — what a rewritten prompt's {{ANGLE}} slot needs.
+  cameras = Object.fromEntries(
+    (Array.isArray(angles) ? angles : [])
+      .filter((angle) => angle?.id && angle?.camera)
+      .map((angle) => [String(angle.id), String(angle.camera)]),
+  )
+
+  // The parts a coloured surface is composed from: too many combinations to
+  // send as finished sentences, so the paragraph arrives with a slot in it.
+  templates = parts?.block && parts?.surfaceToken
+    ? {
+        surfaceToken: String(parts.surfaceToken),
+        block: String(parts.block),
+        realism: String(parts.realism ?? ''),
+        colours: (Array.isArray(parts.colours) ? parts.colours : [])
+          .filter((colour) => colour?.id)
+          .map((colour) => ({ id: String(colour.id), label: String(colour.label ?? colour.id) })),
+        effects: (Array.isArray(parts.effects) ? parts.effects : [])
+          .filter((effect) => effect?.id && effect?.text)
+          .map((effect) => ({
+            id: String(effect.id),
+            label: String(effect.label ?? effect.id),
+            text: String(effect.text),
+          })),
+      }
+    : templates
+
+  if (active) {
+    active.backdrops = cleaned
+    active.cameras = cameras
+    active.templates = templates
+    save()
+  }
+  return {
+    backdrops: cleaned.length,
+    cameras: Object.keys(cameras).length,
+    colours: templates?.colours.length ?? 0,
+    effects: templates?.effects.length ?? 0,
+  }
+}
+
+/**
+ * The surface a prompt is currently describing, when it was never recorded.
+ *
+ * Queues built before backdrops could be changed per image only have the
+ * finished prose, so the phrase is found by looking for one the menu knows.
+ * Longest first, because 'a warm walnut wood surface with open visible grain'
+ * and 'polished marble' can both be on the menu and only the longer match is
+ * the whole phrase.
+ */
+function currentBackdrop(prompt, menu) {
+  return menu
+    .map((entry) => entry.value)
+    .filter((value) => value && prompt.includes(value))
+    .sort((a, b) => b.length - a.length)[0] ?? null
+}
+
+/**
+ * Swaps the surface in a prompt the dashboard already wrote.
+ *
+ * Text surgery rather than a re-render: the launcher has no copy of the prompt
+ * writer. Three shapes turn up, so all three are handled — a built-in prompt
+ * keeps the surface and its lighting on their own lines; a prompt still holding
+ * its slot just needs filling; and a prompt the model wrote has the surface
+ * buried in prose, where the only handle is the phrase itself.
+ *
+ * All three are idempotent: the replacement leaves a handle of the same kind
+ * behind, so changing your mind a second time works as well as the first.
+ */
+function applyBackdrop(prompt, option, menu, known = null) {
+  let changed = false
+  let swapped = prompt
+    .split('\n')
+    .map((line) => {
+      if (line.startsWith('Set the pieces on ')) {
+        changed = true
+        return option.block
+      }
+      if (line.startsWith('Shoot it as a real photograph')) {
+        changed = true
+        return option.realism
+      }
+      return line
+    })
+    .join('\n')
+  if (changed) return { prompt: swapped, changed }
+
+  // A prompt the model wrote may keep the slot instead of a sentence.
+  if (swapped.includes(BACKDROP_TOKEN)) {
+    return { prompt: swapped.split(BACKDROP_TOKEN).join(option.value), changed: true }
+  }
+
+  const previous = known ?? currentBackdrop(swapped, menu)
+  if (!previous) return { prompt: swapped, changed: false }
+  // Already the surface being asked for — going back to it is a success, not a
+  // prompt that could not be understood.
+  if (previous === option.value) return { prompt: swapped, changed: true }
+
+  // The written prompts phrase it as "on a <surface> background". A scene
+  // surface is already a whole noun phrase — it brings its own article and
+  // reading "on a a velvet surface ... background" is nonsense — while a short
+  // named one is a bare noun that still wants both words around it. So the
+  // article and the trailing word are matched too, and put back only when the
+  // incoming surface needs them.
+  const whole = /^an? /.test(option.value)
+  const previousWhole = /^an? /.test(previous)
+  const pattern = new RegExp(`(\\ban?\\s+)?${previous.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s+background)?`, 'g')
+  swapped = swapped.replace(pattern, (_match, article, background) => {
+    if (whole) return option.value
+    return `${article ?? (previousWhole ? 'a ' : '')}${option.value}${background ?? (previousWhole ? ' background' : '')}`
+  })
+  return { prompt: swapped, changed: true }
+}
+
+/**
+ * The prompt this item started with, remembered the first time it is touched.
+ *
+ * Kept so "reset" means something and so switching backdrops repeatedly does
+ * not layer one rewrite on top of another.
+ */
+function rememberBase(item) {
+  if (item.basePrompt === undefined) item.basePrompt = item.prompt
+  return item.basePrompt
+}
+
+function find(itemId) {
+  if (!active) return null
+  return active.items.find((entry) => entry.id === itemId) ?? null
+}
+
+/** Replaces one item's prompt by hand; an empty one puts the original back. */
+export function setPrompt(itemId, prompt) {
+  const item = find(itemId)
+  if (!item) return null
+  const text = String(prompt ?? '').trim()
+  const base = rememberBase(item)
+  if (!text) {
+    item.prompt = base
+    delete item.edited
+    delete item.backdrop
+    delete item.colour
+    delete item.surface
+    delete item.effects
+    delete item.writtenBy
+  } else {
+    item.prompt = text
+    item.edited = text !== base
+    if (!item.edited) delete item.edited
+    // The typed text is the truth: an effect paragraph deleted by hand is off.
+    const present = effectMenu().filter((effect) => text.includes(effect.text)).map((effect) => effect.id)
+    if (present.length) item.effects = present
+    else delete item.effects
+  }
+  save()
+  writePromptSheet(active)
+  return item
+}
+
+/* ---------------- atmosphere ---------------- */
+
+function effectMenu() {
+  return (active?.templates ?? templates)?.effects ?? []
+}
+
+/**
+ * The prompt with every effect paragraph removed.
+ *
+ * Removing rather than remembering an offset means a prompt that has since been
+ * rewritten — by hand or by a model — still comes clean.
+ */
+function withoutEffects(prompt) {
+  let stripped = prompt
+  for (const effect of effectMenu()) {
+    stripped = stripped.split(`\n\n${effect.text}`).join('').split(effect.text).join('')
+  }
+  return stripped.replace(/\n{3,}/g, '\n\n').trimEnd()
+}
+
+/** The prompt with exactly the effects this item has switched on, at the end. */
+function withEffects(prompt, item) {
+  const on = new Set(item.effects ?? [])
+  const wanted = effectMenu().filter((effect) => on.has(effect.id))
+  const clean = withoutEffects(prompt)
+  return wanted.length ? `${clean}\n\n${wanted.map((effect) => effect.text).join('\n\n')}` : clean
+}
+
+/** Switches one atmospheric effect on or off for a single image. */
+export function setEffect(itemId, effectId, on) {
+  const item = find(itemId)
+  if (!item) return null
+  const effect = effectMenu().find((entry) => entry.id === String(effectId ?? ''))
+  if (!effect) fail('That effect is not on the menu — reload Combo Maker and try again.')
+
+  const enabled = new Set(item.effects ?? [])
+  if (on) enabled.add(effect.id)
+  else enabled.delete(effect.id)
+  item.effects = [...enabled]
+  if (!item.effects.length) delete item.effects
+
+  rememberBase(item)
+  item.prompt = withEffects(item.prompt, item)
+  save()
+  writePromptSheet(active)
+  return item
+}
+
+/**
+ * A surface in a colour that was not one of the ready-made ones.
+ *
+ * The colour goes where the surface's own colour used to be — after the article
+ * when it has one, so "a velvet surface with soft directional pile" becomes
+ * "a deep emerald green velvet surface with soft directional pile" rather than
+ * something that reads like a list.
+ */
+function recolour(option, colour) {
+  const parts = active?.templates ?? templates
+  if (!colour || !option.material || !parts) return option
+  const material = option.material
+  // The article is rebuilt rather than kept: "an antique mirror" in dove grey
+  // is "a soft dove grey antique mirror", and the old "an" would be wrong.
+  const article = /^[aeiou]/i.test(colour.id) ? 'an ' : 'a '
+  const value = /^an?\s/.test(material)
+    ? material.replace(/^an?\s+/, `${article}${colour.id} `)
+    : `${colour.id} ${material}`
+  return {
+    ...option,
+    value,
+    block: parts.block.split(parts.surfaceToken).join(value),
+    realism: parts.realism || option.realism,
+  }
+}
+
+/**
+ * Puts one item on a different surface, optionally in a colour of its own.
+ *
+ * A hand-edited prompt is swapped in place so the edit survives; an untouched
+ * one is rebuilt from the original, so the surface can be changed as many times
+ * as you like without the prompt drifting.
+ */
+export function setBackdrop(itemId, backdropId, colourId) {
+  const item = find(itemId)
+  if (!item) return null
+  const menu = active.backdrops?.length ? active.backdrops : backdrops
+  const chosen = menu.find((entry) => entry.id === String(backdropId ?? ''))
+  if (!chosen) fail('That backdrop is not on the menu — reload Combo Maker and try again.')
+
+  const parts = active.templates ?? templates
+  const colour = colourId ? parts?.colours.find((entry) => entry.id === String(colourId)) : null
+  if (colourId && !colour) fail('That colour is not on the menu — reload Combo Maker and try again.')
+  if (colour && !chosen.material) fail(`${chosen.label} has no material to tint — pick a surface first.`)
+
+  const option = recolour(chosen, colour)
+  const base = rememberBase(item)
+  // A coloured surface is not on the menu, so the phrase it replaced has to be
+  // remembered rather than looked up.
+  const source = withoutEffects(item.edited ? item.prompt : base)
+  const previous = item.edited && item.surface && source.includes(item.surface) ? item.surface : null
+  const { prompt, changed } = applyBackdrop(source, option, menu, previous)
+  if (!changed) {
+    fail('Could not find the surface in this prompt — rewrite it by hand instead.')
+  }
+  // The surface is swapped on the prompt without its atmosphere, then the
+  // atmosphere goes back on — otherwise changing the surface would quietly
+  // switch the haze off, or leave two copies of it.
+  item.prompt = withEffects(prompt, item)
+  item.backdrop = chosen.id
+  item.surface = option.value
+  if (colour) item.colour = colour.id
+  else delete item.colour
+  save()
+  writePromptSheet(active)
+  return item
+}
+
+/** The files a model would have to look at to write this item's prompt. */
+export function referencesFor(itemId) {
+  const item = find(itemId)
+  if (!item) return null
+  return (item.references ?? []).map((relative) => referencePath(relative)).filter(Boolean)
+}
+
+/**
+ * Installs a prompt a model wrote from this item's own reference pictures.
+ *
+ * What comes back is a template with slots rather than a finished prompt — the
+ * model is shown the products, not told the camera angle or the surface, so
+ * those are filled in here from what this particular item already is. That is
+ * what keeps a rewrite a rewrite of *this shot* and not of the whole combo.
+ */
+export function setWrittenPrompt(itemId, written, model) {
+  const item = find(itemId)
+  if (!item) return null
+  const text = String(written ?? '').trim()
+  if (!text) fail('The model returned nothing to use.')
+
+  const base = rememberBase(item)
+  const menu = active.backdrops?.length ? active.backdrops : backdrops
+
+  // The camera clause for this shot. The angle id is the second half of the
+  // item id, which is how a queue built before any of this still resolves.
+  const angleId = String(item.id).split('::')[1] ?? ''
+  const camera = (active.cameras ?? cameras)[angleId]
+  let prompt = text.split(ANGLE_TOKEN).join(camera || item.angle)
+
+  // The surface it is already on, so a rewrite does not silently move it.
+  if (prompt.includes(BACKDROP_TOKEN)) {
+    const value = item.backdrop ?? currentBackdrop(base, menu) ?? 'clean seamless white'
+    const option = menu.find((entry) => entry.id === value)
+    const phrase = item.surface ?? option?.value ?? value
+    prompt = prompt.split(BACKDROP_TOKEN).join(phrase)
+    item.backdrop = option?.id ?? value
+    item.surface = phrase
+  }
+
+  item.prompt = withEffects(prompt, item)
+  item.edited = true
+  item.writtenBy = String(model ?? '')
+  save()
+  writePromptSheet(active)
   return item
 }
 

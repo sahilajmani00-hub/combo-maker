@@ -24,6 +24,8 @@ import {
   angleById,
   fillShot,
   backdropFor,
+  backdropMenu,
+  backdropTemplates,
   buildPrompt,
   fillProducts,
   type AngleId,
@@ -48,6 +50,7 @@ import {
   saveTemplate,
   appendQueue,
   beginQueue,
+  sendWording,
   finishQueue,
   saveDescribeKey,
   startRun,
@@ -1933,3 +1936,15 @@ fetchConfig()
 refresh()
 
 void refreshTemplates()
+
+// The extension can put one image on a different surface, and can have a model
+// rewrite one prompt from its reference. Both need wording that lives here
+// rather than in the launcher, so it is offered on each load — which also
+// upgrades a queue that was built before either feature existed.
+void sendWording({
+  backdrops: backdropMenu(),
+  angles: ANGLES.map((angle) => ({ id: angle.id, camera: angle.camera })),
+  templates: backdropTemplates(),
+}).catch(() => {
+  /* no launcher, or nothing queued — the rest of the page is unaffected */
+})

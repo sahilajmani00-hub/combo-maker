@@ -202,10 +202,14 @@ export const BACKDROP_TOKEN = '{{BACKDROP}}'
  * One call per combo, not per image: the angle and the backdrop are left as
  * slots and filled per shot, so four angles still cost one call.
  */
-const COMBO_SYSTEM = [
-  'You are looking at a flat working layout that holds several different jewellery products side by side. They are about to be re-photographed together as one studio product shot for a marketplace listing. Write the image-generation prompt for that shot.',
+const comboSystem = (separate) => [
+  separate
+    ? 'You are looking at several photographs, each of ONE jewellery product. They are about to be re-photographed together in a single studio product shot for a marketplace listing. Write the image-generation prompt for that shot.'
+    : 'You are looking at a flat working layout that holds several different jewellery products side by side. They are about to be re-photographed together as one studio product shot for a marketplace listing. Write the image-generation prompt for that shot.',
   '',
-  'What you see is a layout, not a scene: its plain background is a working aid and must not appear in your prompt as the setting.',
+  separate
+    ? 'What you see are reference photographs, not a scene: their plain backgrounds are a working aid and must not appear in your prompt as the setting.'
+    : 'What you see is a layout, not a scene: its plain background is a working aid and must not appear in your prompt as the setting.',
   '',
   'Your prompt MUST contain both of these literal tokens, each exactly once:',
   `- ${ANGLE_TOKEN} where the camera angle belongs;`,
@@ -223,17 +227,32 @@ const COMBO_SYSTEM = [
   'Write 120 to 200 words of plain declarative sentences. No headings, no bullet points, no markdown, no preamble — output only the prompt.',
 ].join('\n')
 
-export async function promptForCombo(key, model, { data, type, subject, count }, signal) {
+/**
+ * One combo's prompt, written from its reference picture or pictures.
+ *
+ * Both reference shapes end up here: a composite layout of the whole combo, and
+ * the separate product photos a multi-reference model is given. The brief is
+ * the same either way — only what the model is looking at differs.
+ */
+export async function promptForCombo(key, model, { data, type, images, subject, count }, signal) {
+  const pictures = images?.length ? images : [{ data, type }]
+  const separate = pictures.length > 1
+  const opening = separate
+    ? `Write the prompt for these ${pictures.length} products photographed together. Each picture is ONE product.`
+    : `Write the prompt for this layout. It holds ${count} different ${subject || 'products'}.`
   const text = await chat(
     key,
     model,
     [
-      { role: 'system', content: COMBO_SYSTEM },
+      { role: 'system', content: comboSystem(separate) },
       {
         role: 'user',
         content: [
-          { type: 'text', text: `Write the prompt for this layout. It holds ${count} different ${subject || 'products'}.` },
-          { type: 'image_url', image_url: { url: `data:${type};base64,${data}` } },
+          { type: 'text', text: opening },
+          ...pictures.map((picture) => ({
+            type: 'image_url',
+            image_url: { url: `data:${picture.type};base64,${picture.data}` },
+          })),
         ],
       },
     ],

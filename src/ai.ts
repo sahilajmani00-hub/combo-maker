@@ -8,6 +8,7 @@
 
 import { prepareImage } from './imageprep.ts'
 import { canvasToBlob } from './compose.ts'
+import { backdropTemplates, type BackdropOption } from './angles.ts'
 
 export type AiModel = {
   id: string
@@ -176,6 +177,23 @@ export const appendQueue = (batch: {
 }) => request<{ combos: number; items: number }>('/api/queue/append', postJson(batch))
 
 export const finishQueue = () => request<QueueSummary>('/api/queue/finish', postJson({}))
+
+/**
+ * Gives the launcher the wording the extension needs per image.
+ *
+ * The prompt writer lives in the browser, so the extension can only offer a
+ * different backdrop — or slot a camera angle into a prompt a model wrote — if
+ * the finished sentences are handed over first.
+ */
+export const sendWording = (payload: {
+  backdrops: BackdropOption[]
+  angles: { id: string; camera: string }[]
+  templates: ReturnType<typeof backdropTemplates>
+}) =>
+  request<{ backdrops: number; cameras: number; colours: number; effects: number }>(
+    '/api/queue/wording',
+    postJson(payload),
+  )
 
 /** Has a top model write one prompt per camera angle, products left as a slot. */
 export const writePrompts = (payload: {

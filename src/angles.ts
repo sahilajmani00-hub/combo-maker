@@ -133,16 +133,16 @@ export const MIXED_BACKGROUND = 'mixed'
  * should read as a photograph of an object sitting somewhere.
  */
 export const SCENE_BACKDROPS = [
-  'a warm sand-toned plaster surface with soft natural texture',
-  'a deep charcoal slate slab with a matte, faintly uneven finish',
-  'a muted sage-green painted wood surface with fine grain',
-  'a dusty terracotta clay surface with a chalky matte bloom',
-  'a soft dove-grey polished concrete slab with fine aggregate speckle',
-  'a warm oatmeal linen cloth falling in gentle folds',
-  'a deep burgundy velvet surface with soft directional pile',
-  'a pale champagne satin drape with shallow rippling highlights',
-  'a smoky blue-grey stone slab with subtle mineral veining',
-  'a warm walnut wood surface with open visible grain',
+  { label: 'Sand plaster', text: 'a warm sand-toned plaster surface with soft natural texture', material: 'a plaster surface with soft natural texture' },
+  { label: 'Charcoal slate', text: 'a deep charcoal slate slab with a matte, faintly uneven finish', material: 'a slate slab with a matte, faintly uneven finish' },
+  { label: 'Sage wood', text: 'a muted sage-green painted wood surface with fine grain', material: 'a painted wood surface with fine grain' },
+  { label: 'Terracotta clay', text: 'a dusty terracotta clay surface with a chalky matte bloom', material: 'a clay surface with a chalky matte bloom' },
+  { label: 'Dove concrete', text: 'a soft dove-grey polished concrete slab with fine aggregate speckle', material: 'a polished concrete slab with fine aggregate speckle' },
+  { label: 'Oatmeal linen', text: 'a warm oatmeal linen cloth falling in gentle folds', material: 'a linen cloth falling in gentle folds' },
+  { label: 'Burgundy velvet', text: 'a deep burgundy velvet surface with soft directional pile', material: 'a velvet surface with soft directional pile' },
+  { label: 'Champagne satin', text: 'a pale champagne satin drape with shallow rippling highlights', material: 'a satin drape with shallow rippling highlights' },
+  { label: 'Blue-grey stone', text: 'a smoky blue-grey stone slab with subtle mineral veining', material: 'a stone slab with subtle mineral veining' },
+  { label: 'Walnut grain', text: 'a warm walnut wood surface with open visible grain', material: 'a wood surface with open visible grain' },
 ]
 
 /**
@@ -152,26 +152,179 @@ export const SCENE_BACKDROPS = [
  * same queue and combo 7 lands on the same surface it had before.
  */
 export function backdropFor(background: string, comboIndex: number): string {
-  if (background === MIXED_BACKGROUND) return SCENE_BACKDROPS[comboIndex % SCENE_BACKDROPS.length]
+  if (background === MIXED_BACKGROUND) return SCENE_BACKDROPS[comboIndex % SCENE_BACKDROPS.length].text
   return background
 }
 
-/** Backdrops phrased the way the model reads them, not as hex colours. */
+/**
+ * Backdrops phrased the way the model reads them, not as hex colours.
+ *
+ * `material` is the same surface with its colour taken out, so a colour can be
+ * put back in its place — "polished marble" in dusty rose, "a velvet surface
+ * with soft directional pile" in deep emerald. A few surfaces are a colour and
+ * nothing else, and those have no material to recolour.
+ */
 export const AI_BACKGROUNDS = [
-  { id: 'clean seamless white', label: 'White' },
-  { id: MIXED_BACKGROUND, label: 'Mixed (varied)' },
-  { id: AUTO_BACKGROUND, label: 'Classy (auto)' },
-  { id: 'soft ivory paper', label: 'Ivory' },
-  { id: 'warm beige studio', label: 'Beige' },
-  { id: 'light grey seamless', label: 'Grey' },
-  { id: 'matte black', label: 'Black' },
-  { id: 'natural linen fabric', label: 'Linen' },
-  { id: 'polished marble', label: 'Marble' },
-  { id: 'softly draped silk', label: 'Silk' },
-  { id: 'deep velvet cushion', label: 'Velvet' },
-  { id: 'brushed travertine stone slab', label: 'Stone' },
-  { id: 'polished dark walnut tray', label: 'Walnut' },
+  { id: 'clean seamless white', label: 'White', material: 'seamless paper' },
+  { id: MIXED_BACKGROUND, label: 'Mixed (varied)', material: null },
+  { id: AUTO_BACKGROUND, label: 'Classy (auto)', material: null },
+  { id: 'soft ivory paper', label: 'Ivory', material: 'seamless paper' },
+  { id: 'warm beige studio', label: 'Beige', material: 'seamless paper' },
+  { id: 'light grey seamless', label: 'Grey', material: 'seamless paper' },
+  { id: 'matte black', label: 'Black', material: 'matte seamless paper' },
+  { id: 'natural linen fabric', label: 'Linen', material: 'linen fabric' },
+  { id: 'polished marble', label: 'Marble', material: 'polished marble' },
+  { id: 'softly draped silk', label: 'Silk', material: 'softly draped silk' },
+  { id: 'deep velvet cushion', label: 'Velvet', material: 'a velvet cushion' },
+  { id: 'brushed travertine stone slab', label: 'Stone', material: 'a brushed stone slab' },
+  { id: 'polished dark walnut tray', label: 'Walnut', material: 'a polished wood tray' },
+  // Reflective surfaces. They are their own lighting problem — a mirror shows
+  // the underside of everything on it — so each says what the reflection should
+  // do rather than leaving the model to invent one.
+  { id: 'a sheet of clear glass with a soft mirrored reflection beneath each piece', label: 'Glass', material: 'a sheet of glass with a soft mirrored reflection beneath each piece' },
+  { id: 'a smoked grey glass slab with soft diffuse reflections', label: 'Smoked glass', material: 'a glass slab with soft diffuse reflections' },
+  { id: 'a polished mirror surface holding a crisp upright reflection of each piece', label: 'Mirror', material: 'a polished mirror surface holding a crisp upright reflection of each piece' },
+  { id: 'an antique mirror with a softly mottled patina and gentle reflections', label: 'Antique mirror', material: 'an antique mirror with a softly mottled patina and gentle reflections' },
 ]
+
+/**
+ * Colours a surface can be asked for, as a photographer would say them.
+ *
+ * Named rather than hex: the image model reads "dusty rose" and "deep emerald
+ * green" as the muted, physical colours they are, where #C08081 means nothing
+ * to it. Chosen to flatter metal and stones rather than compete with them.
+ */
+export const BACKDROP_COLOURS = [
+  { id: 'warm ivory', label: 'Ivory' },
+  { id: 'soft blush pink', label: 'Blush' },
+  { id: 'dusty rose', label: 'Dusty rose' },
+  { id: 'warm terracotta', label: 'Terracotta' },
+  { id: 'warm sand', label: 'Sand' },
+  { id: 'warm caramel', label: 'Caramel' },
+  { id: 'muted sage green', label: 'Sage' },
+  { id: 'deep emerald green', label: 'Emerald' },
+  { id: 'soft sky blue', label: 'Sky blue' },
+  { id: 'dusty slate blue', label: 'Slate blue' },
+  { id: 'deep navy', label: 'Navy' },
+  { id: 'soft lilac', label: 'Lilac' },
+  { id: 'deep plum', label: 'Plum' },
+  { id: 'deep burgundy', label: 'Burgundy' },
+  { id: 'warm taupe', label: 'Taupe' },
+  { id: 'soft dove grey', label: 'Dove grey' },
+  { id: 'deep charcoal', label: 'Charcoal' },
+  { id: 'matte black', label: 'Black' },
+]
+
+/**
+ * How the shot is lit and rendered, which the surface decides.
+ *
+ * White is a different photographic problem to a textured surface — brighter,
+ * flatter, deeper focus — so the two get different camera notes.
+ */
+export function realismFor(background: string): string {
+  return background === WHITE_BACKDROP
+    ? 'Shoot it as a real photograph on a full-frame camera with an 85mm macro lens at f/5.6: true optics, natural depth-of-field falloff, believable specular highlights on metal and stones, soft-edged contact shadows grounding each piece. Clean and bright, but never a flat cut-out — it must read as something photographed, not rendered.'
+    : 'Shoot it as a real photograph on a full-frame camera with an 85mm macro lens at f/4: true optics, natural depth-of-field falloff, shallow but honest focus. Physically plausible studio lighting — a large softbox key slightly off-axis, gentle bounce fill, and soft-edged contact shadows that sit the pieces convincingly on the surface. Render the surface with its real texture and micro-detail, faint ambient colour bounce onto the metal, believable reflections. It must look like an actual photograph, not a 3D render, not a cut-out pasted onto a colour.'
+}
+
+/**
+ * The paragraph that names the surface.
+ *
+ * "Classy (auto)" hands the choice over instead of naming one, with enough of a
+ * brief that it stays a product shot rather than a still life.
+ */
+export function backdropBlockFor(background: string): string {
+  return background === AUTO_BACKGROUND
+    ? 'Set the pieces on one simple, real surface chosen to suit them — draped silk, velvet, brushed stone, fine linen or polished wood — in a colour that flatters the jewellery and keeps it the clear subject. Nothing else in the scene: no props, no scattering, no decoration. Arrange them with even spacing and consistent scale.'
+    : `Set the pieces on ${background}. Keep the setting simple and uncluttered — the surface alone, filling the frame behind and beneath them as a real physical environment, with nothing else placed in the scene. Arrange the products with even spacing and consistent scale.`
+}
+
+/** What "auto" stands in for when a prompt needs the surface as a phrase. */
+const AUTO_PHRASE = 'one simple, real surface chosen to suit the pieces'
+
+export type BackdropOption = {
+  /** The backdrop phrase itself, which is unique enough to be the id. */
+  id: string
+  label: string
+  /** The phrase to drop into a `{{BACKDROP}}` slot. */
+  value: string
+  /** The same surface with its colour removed, or null if it is only a colour. */
+  material: string | null
+  /** The rendered "Set the pieces on ..." paragraph. */
+  block: string
+  /** The rendered camera-and-lighting paragraph that goes with it. */
+  realism: string
+}
+
+/** The slot a backdrop paragraph leaves for the surface it is describing. */
+export const SURFACE_TOKEN = '{{SURFACE}}'
+
+/**
+ * Atmosphere that can be switched on for one shot, as whole sentences.
+ *
+ * Added to a prompt as its own paragraph and taken away by removing that same
+ * paragraph, so a switch really is a switch — nothing is left behind when it
+ * goes off again. The wording spends most of its words on what the effect must
+ * NOT do: haze in front of a product is the difference between a moody listing
+ * image and one a shopper cannot read.
+ */
+export const PROMPT_EFFECTS = [
+  {
+    id: 'fog',
+    label: 'Fog / smoke',
+    text: 'Add a low drift of fine haze across the surface: thin smoke pooling shallowly around the base of the pieces and thinning as it rises, catching the light in soft visible shafts. Keep it entirely behind and between the products and below their midpoint — every product stays sharp, fully lit and completely unobscured, with its silhouette and fine detail reading as clearly as it would with no haze at all.',
+  },
+]
+
+/**
+ * Everything needed to phrase a surface the dashboard has not itself composed.
+ *
+ * The extension can pair any backdrop with any colour, which is far too many
+ * combinations to send as finished sentences. It gets the parts instead: the
+ * paragraph with a slot where the surface goes, and the two lighting notes to
+ * choose between.
+ */
+export function backdropTemplates() {
+  return {
+    surfaceToken: SURFACE_TOKEN,
+    block: backdropBlockFor(SURFACE_TOKEN),
+    // A surface with a colour asked for is never the plain white sweep, so the
+    // lighting note that goes with it is always the textured-surface one.
+    realism: realismFor(SURFACE_TOKEN),
+    colours: BACKDROP_COLOURS,
+    effects: PROMPT_EFFECTS,
+  }
+}
+
+/**
+ * Every surface offered per image, rendered rather than named.
+ *
+ * The extension swaps a queued prompt's backdrop line for line, and it has no
+ * copy of the prompt writer — so the menu it is given carries the finished
+ * sentences. That keeps this file the only place the wording lives.
+ *
+ * "Mixed" is left out: it means *vary across combos*, which is a decision about
+ * a whole run, not something one image can be set to.
+ */
+export function backdropMenu(): BackdropOption[] {
+  const named = AI_BACKGROUNDS.filter((entry) => entry.id !== MIXED_BACKGROUND).map((entry) => ({
+    id: entry.id,
+    label: entry.label,
+    value: entry.id === AUTO_BACKGROUND ? AUTO_PHRASE : entry.id,
+    material: entry.material,
+  }))
+  const scenes = SCENE_BACKDROPS.map((scene) => ({
+    id: scene.text,
+    label: scene.label,
+    value: scene.text,
+    material: scene.material,
+  }))
+  return [...named, ...scenes].map((entry) => ({
+    ...entry,
+    block: backdropBlockFor(entry.id),
+    realism: realismFor(entry.id),
+  }))
+}
 
 export type PromptOptions = {
   /** What the products are, e.g. "earrings". Drives how the model treats them. */
@@ -217,7 +370,6 @@ export function buildPrompt({ subject, count, angle, background, extra, composit
     ? `The reference image is a flat working layout holding all ${count} products side by side. Re-photograph every one of them together in a single frame as real objects.`
     : `The ${count} reference images are ${count} different products, one per image. Photograph all ${count} of them together in a single frame.`
   const described = products.map((text) => text.trim()).filter(Boolean)
-  const white = background === 'clean seamless white'
 
   /**
    * Without this the model copies the reference's flat white ground straight
@@ -228,14 +380,8 @@ export function buildPrompt({ subject, count, angle, background, extra, composit
     ? 'Its plain background is NOT the scene — it is a working layout only. Ignore that background completely and build the environment described below around the products.'
     : 'Their plain backgrounds are NOT the scene. Ignore them completely and build the environment described below around the products.'
 
-  const realism = white
-    ? 'Shoot it as a real photograph on a full-frame camera with an 85mm macro lens at f/5.6: true optics, natural depth-of-field falloff, believable specular highlights on metal and stones, soft-edged contact shadows grounding each piece. Clean and bright, but never a flat cut-out — it must read as something photographed, not rendered.'
-    : 'Shoot it as a real photograph on a full-frame camera with an 85mm macro lens at f/4: true optics, natural depth-of-field falloff, shallow but honest focus. Physically plausible studio lighting — a large softbox key slightly off-axis, gentle bounce fill, and soft-edged contact shadows that sit the pieces convincingly on the surface. Render the surface with its real texture and micro-detail, faint ambient colour bounce onto the metal, believable reflections. It must look like an actual photograph, not a 3D render, not a cut-out pasted onto a colour.'
-  // "Classy (auto)" hands the choice over instead of naming a surface, with
-  // enough of a brief that it stays a product shot rather than a still life.
-  const backdrop = background === AUTO_BACKGROUND
-    ? 'Set the pieces on one simple, real surface chosen to suit them — draped silk, velvet, brushed stone, fine linen or polished wood — in a colour that flatters the jewellery and keeps it the clear subject. Nothing else in the scene: no props, no scattering, no decoration. Arrange them with even spacing and consistent scale.'
-    : `Set the pieces on ${background}. Keep the setting simple and uncluttered — the surface alone, filling the frame behind and beneath them as a real physical environment, with nothing else placed in the scene. Arrange the products with even spacing and consistent scale.`
+  const realism = realismFor(background)
+  const backdrop = backdropBlockFor(background)
   const lines = [
     `Professional studio product photograph of exactly ${count} DIFFERENT ${item}, shown together in one frame as ${count} separate products.`,
     // A reference is one product — one thing a shopper buys — and that may be a
