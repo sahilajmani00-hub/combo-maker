@@ -1,21 +1,43 @@
 # Invite-only Combo Maker
 
-This implementation is ready to deploy but is not live yet. GitHub stores the source;
-a Node.js server enforces access. GitHub Pages cannot run this server. The existing
-Pages information and OAuth privacy pages remain unchanged.
+The selected deployment is **ChatGPT Sites**, using the hosting included with the
+owner's eligible ChatGPT plan during beta, subject to plan limits. No separate VPS,
+domain registration, payment details, or hosting subscription is required for this setup.
+
+Selected address: **https://sahil-combo-maker.sahilajmani00.chatgpt.site**
+
+Sites manages the login and visitor allowlist before serving this dashboard. The owner
+can add named people in **Sites → Combo Maker → Share**. Keep the audience restricted
+to selected people. Invited visitors must sign in with the account granted access.
+No separate Combo Maker password or SQLite account database is used on Sites.
+
+The site starts owner-only; nobody else has been invited automatically. External viewer
+invitations are enabled for this site. To remove access, remove the person in Share.
+The source `.openai/hosting.json` identifies the existing site; reuse it for updates.
+Build the Sites artifact with `npm run build:sites`. Publish through Sites after pushing
+the exact source commit to the Sites source repository. The original GitHub repository
+continues to hold the application source as well.
+
+Product photos remain in each browser and are not uploaded or saved between sessions.
+The Sites-specific privacy page is `sites/privacy.html`. The original custom-password
+server is retained below as an optional self-hosted deployment.
+
+See [Sites hosting and sharing](https://help.openai.com/en/articles/20001339) for included
+beta usage limits and access management. A `chatgpt.site` address is a hosted subdomain,
+not a separately registered domain you own.
 
 ## What users can do
 
-Invited users choose a password, sign in, compose product photos, and download images
+Invited users sign in, compose product photos, and download images
 or ZIPs from a phone, tablet, or computer. Each browser keeps its own photos in memory.
 There is no public signup and no shared photo library.
 
 AI, Google Drive, Cloudinary, and saved disk templates remain in the local app.
 The hosted server does not expose any of the local app's APIs or credentials.
 
-## Deploy on your Hostinger VPS
+## Optional: deploy on your Hostinger VPS
 
-The selected host is the existing **Hostinger VPS**. No new hosting subscription is
+An alternative host is the existing **Hostinger VPS**. No new hosting subscription is
 needed. Deployment is waiting for the VPS SSH connection details and the dashboard's
 domain or subdomain. Do not replace an existing site or reinstall the VPS operating system.
 
@@ -98,7 +120,7 @@ For a custom domain, set `APP_URL` to its exact HTTPS origin, without a path, an
 that domain for invitations and login. Always terminate public traffic over HTTPS.
 See [Render Blueprints](https://render.com/docs/blueprint-spec) for hosting configuration.
 
-## Invite someone
+## Self-hosted server: invite someone
 
 Run in the **deployed server's shell** with the same `APP_URL` and `DATA_DIR` as the app,
 so it uses the deployed account database (for Docker, use the container command above):
@@ -151,7 +173,7 @@ directory. A local invite does not create an account on the deployed server.
 `npm start` continues to run the original local app. `npm run build` and
 `npm run build:hosted` use separate output directories, so they do not overwrite each other.
 
-## Authentication behavior
+## Self-hosted authentication behavior
 
 - Scrypt password hashes with a unique random salt; no plain-text passwords.
 - Random session tokens stored only as SHA-256 hashes; seven-day expiry.

@@ -94,6 +94,7 @@ type Result = {
 }
 type Tab = 'canvas' | 'ai'
 
+const MANAGED_ACCESS = import.meta.env.VITE_MANAGED_ACCESS === 'true'
 const INVITE_PORTAL = import.meta.env.VITE_INVITE_PORTAL === 'true'
 const STATIC_HOST = import.meta.env.VITE_STATIC_HOST === 'true'
 if (STATIC_HOST) document.documentElement.classList.add('static-host')
@@ -233,7 +234,7 @@ const modeOptionsHtml = () =>
 app.innerHTML = `
   <header class="topbar">
     <a class="brand" href="."><span class="brand-mark">CM</span><span>Combo Maker</span></a>
-    <div class="account-actions">${INVITE_PORTAL ? '<form method="post" action="/auth/logout"><button class="link-button" type="submit">Sign out</button></form>' : ''}<span class="local-pill"><span class="status-dot"></span>${STATIC_HOST ? 'Runs in your browser' : 'Runs locally'}</span></div>
+    <div class="account-actions">${INVITE_PORTAL ? '<form method="post" action="/auth/logout"><button class="link-button" type="submit">Sign out</button></form>' : ''}<span class="local-pill"><span class="status-dot"></span>${MANAGED_ACCESS ? 'Invite-only access' : STATIC_HOST ? 'Runs in your browser' : 'Runs locally'}</span></div>
   </header>
   <main>
     <section class="intro">

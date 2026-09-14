@@ -11,9 +11,9 @@ images. It has two sections:
 
 ## Invite-only hosted dashboard
 
-The server-hosted version requires an invitation and individual password before it
-serves the dashboard. There is no public signup. See [hosting and invitations](HOSTING.md)
-for deployment, creating invitations, password resets, and revoking access.
+The managed Sites deployment uses invite-only sharing and sign-in through ChatGPT.
+There is no public signup. Address: https://sahil-combo-maker.sahilajmani00.chatgpt.site
+See [hosting and invitations](HOSTING.md) for access management and self-hosted alternatives.
 
 The hosted version supports browser-based photo composition and downloads. Photos stay
 in each user's browser. The existing AI, Drive, Cloudinary, and disk-template integrations

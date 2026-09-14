@@ -11,7 +11,8 @@
     "build:hosted": "tsc && vite build --mode hosted --outDir hosted-dist",
     "start:hosted": "node tools/portal.mjs",
     "invite": "node tools/invite.mjs",
-    "test:auth": "node --test test/portal.test.mjs"
+    "test:auth": "node --test test/portal.test.mjs",
+    "build:sites": "tsc && vite build --mode sites --outDir sites-dist/client && node tools/prepare-sites.mjs"
   },
   "devDependencies": {
     "typescript": "~6.0.2",
