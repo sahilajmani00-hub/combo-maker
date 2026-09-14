@@ -16,14 +16,17 @@
 
 import { createServer } from 'node:http'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { extname, join, normalize, resolve, sep } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { basename, extname, join, normalize, resolve, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { estimate, probeModels, readCredentials, verifyCredentials, writeCredentials } from './higgsfield.mjs'
 import * as airun from './airun.mjs'
 import * as openrouter from './openrouter.mjs'
 import * as queue from './queue.mjs'
 import * as templates from './templates.mjs'
+import * as drive from './drive.mjs'
+import * as cloudinary from './cloudinary.mjs'
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const dist = join(root, 'dist')
@@ -285,6 +288,653 @@ async function reversePrompts(key, model, body) {
   return { model, directory, total: results.length, written: written.length, results }
 }
 
+/** Where Google sends the browser back after consent. */
+function redirectUri() {
+  const address = server.address()
+  const port = typeof address === 'object' && address ? address.port : 4173
+  return `http://localhost:${port}/api/drive/callback`
+}
+
+/** Progress of the upload currently running, polled by the page. */
+let driveRun = null
+
+/**
+ * Where the last run's manifest is kept between restarts.
+ *
+ * The listing sheet is built entirely from that manifest, so holding it only
+ * in memory meant restarting the launcher silently threw away the URLs for a
+ * finished upload — the sheet button simply disappeared, with the images still
+ * sitting in Drive and no way left to get a spreadsheet for them. Several
+ * hundred uploads are too expensive to repeat over a process exit.
+ */
+const RUN_FILE = join(root, '.last-drive-run.json')
+
+function saveRun(run) {
+  if (!run?.manifest?.length) return
+  try {
+    // Explicit field list rather than the whole object: it is the reason no
+    // credential can ever reach this file by accident.
+    const { status, folder, total, done, skipped, failed, link, error, hosted, hostError, layout, rootId, manifest } = run
+    const saved = { status, folder, total, done, skipped, failed, link, error, hosted, hostError, layout, rootId, manifest, savedAt: new Date().toISOString() }
+    writeFileSync(RUN_FILE, `${JSON.stringify(saved, null, 2)}\n`, 'utf8')
+  } catch {
+    // Losing the cache is not worth failing an upload over.
+  }
+}
+
+function loadRun() {
+  try {
+    if (!existsSync(RUN_FILE)) return null
+    const run = JSON.parse(readFileSync(RUN_FILE, 'utf8'))
+    if (!run?.manifest?.length) return null
+    // Nothing can still be running: the process that was running it is gone.
+    // Left as "running" it would block the next upload and poll forever.
+    if (run.status === 'running') run.status = 'finished'
+    return run
+  } catch {
+    return null
+  }
+}
+
+driveRun = loadRun()
+
+/**
+ * Mirrors one image to Cloudinary so the spreadsheet has a durable URL.
+ *
+ * Drive does serve the bytes, but only through lh3.googleusercontent.com,
+ * which Google documents nowhere and has broken before — and a bulk listing
+ * that is still being assembled days later cannot afford the URLs in it to
+ * stop resolving. Cloudinary is the copy meant to outlive the run: documented
+ * delivery URLs, a real CDN, and nothing that expires on its own.
+ *
+ * It stays optional. With no credentials configured every run works exactly
+ * as it did and the sheet falls back to the Drive URL, so this is a hardening
+ * step rather than a new thing to set up before uploading anything.
+ */
+/**
+ * Folder names claimed by each run, so two SKUs cannot collide.
+ *
+ * Kept out here rather than on the run object because /api/drive serialises
+ * that straight to the page, and a Map would land there as an empty object.
+ */
+const claimedFolders = new WeakMap()
+
+/**
+ * The Cloudinary folder for one SKU, guaranteed unique within its run.
+ *
+ * Sanitising is lossy — "A & B" and "A-B" both flatten to "A-B" — and uploads
+ * overwrite by design, so without this the second SKU would quietly take over
+ * the first one's URLs and a listing would go live showing the wrong earrings.
+ * A numeric suffix on the loser costs nothing and only appears when two names
+ * genuinely collapse together.
+ */
+function folderFor(run, raw) {
+  let claimed = claimedFolders.get(run)
+  if (!claimed) claimedFolders.set(run, (claimed = { byRaw: new Map(), taken: new Set() }))
+  const existing = claimed.byRaw.get(raw)
+  if (existing) return existing
+
+  const base = cloudinary.safeFolder(raw) || 'combo'
+  let name = base
+  for (let suffix = 2; claimed.taken.has(name); suffix++) name = `${base}-${suffix}`
+  claimed.taken.add(name)
+  claimed.byRaw.set(raw, name)
+  return name
+}
+
+/**
+ * hostImage, but never fatal.
+ *
+ * The Drive upload is the part the user is waiting on; the durable copy is a
+ * bonus on top of it. So a Cloudinary failure is recorded and the run carries
+ * on — losing one mirrored URL is a row to fix, losing the whole upload of
+ * several hundred images is an evening.
+ */
+async function mirror(run, credentials, options) {
+  if (!credentials) return null
+  try {
+    const url = await hostImage(credentials, options)
+    run.hosted += 1
+    return url
+  } catch (error) {
+    run.hostError = error.message
+    return null
+  }
+}
+
+async function hostImage(credentials, { folder, name, data, file, type }) {
+  if (!credentials) return null
+  const uploaded = await cloudinary.uploadImage(credentials, {
+    data,
+    file,
+    type,
+    folder: `combo-maker/${folder}`,
+    publicId: cloudinary.safePublicId(name),
+  })
+  return uploaded.url
+}
+
+/**
+ * Uploads in the shape Flipkart's bulk-listing auto-fill reads.
+ *
+ * One public master folder, a sub-folder per SKU, and images numbered 1, 2, 3
+ * inside each — Flipkart ignores any other filename, so the renaming is not
+ * cosmetic. The folder is shared publicly because Flipkart fetches the images
+ * from its own servers rather than as the signed-in seller.
+ */
+async function runFlipkartUpload(token, rootName, images) {
+  const plan = drive.planFlipkartLayout(images)
+  const total = plan.reduce((sum, group) => sum + group.files.length, 0)
+  const myRun = (driveRun = { status: 'running', folder: rootName, total, done: 0, skipped: 0, failed: 0, link: null, error: null })
+  myRun.manifest = []
+  // Read once per run, not per image: the credentials live in a file.
+  const host = cloudinary.readCredentials(root)
+  myRun.hosted = 0
+  myRun.hostError = null
+
+  const rootId = await drive.ensureFolder(token, rootName, null)
+  myRun.link = `https://drive.google.com/drive/folders/${rootId}`
+  try {
+    await drive.makePublic(token, rootId)
+  } catch (error) {
+    // Worth continuing — the files still upload, they just are not reachable
+    // by Flipkart until the folder is shared by hand.
+    myRun.error = `Uploaded, but could not make the folder public: ${error.message}`
+  }
+
+  for (const group of plan) {
+    if (myRun.status === 'cancelled') break
+    try {
+      const skuId = await drive.ensureFolder(token, group.sku, rootId)
+      const existing = await drive.listFileEntries(token, skuId)
+      const entry = { sku: group.sku, images: [] }
+      for (const image of group.files) {
+        if (myRun.status === 'cancelled') break
+        // A file already in Drive still belongs in the spreadsheet, so its id
+        // is taken from the listing rather than being uploaded again.
+        const already = existing.get(image.uploadAs)
+        // A skipped file still needs its durable URL, because the sheet is
+        // built from the whole manifest and a re-run into an existing folder
+        // would otherwise produce rows with holes in them.
+        const hosted = await mirror(myRun, host, {
+          folder: folderFor(myRun, `${rootName}/${group.sku}`),
+          name: image.uploadAs,
+          file: image.file,
+        })
+        if (already) {
+          entry.images.push({ name: image.uploadAs, id: already, url: drive.directImageUrl(already), hosted })
+          myRun.skipped += 1
+          continue
+        }
+        const uploaded = await drive.uploadFile(token, { file: image.file, name: image.uploadAs, parentId: skuId })
+        entry.images.push({ name: image.uploadAs, id: uploaded.id, url: drive.directImageUrl(uploaded.id), hosted })
+        myRun.done += 1
+      }
+      if (entry.images.length) myRun.manifest.push(entry)
+    } catch (error) {
+      myRun.failed += group.files.length
+      myRun.error = error.message
+    }
+  }
+  if (myRun.status === 'running') myRun.status = 'finished'
+  saveRun(myRun)
+}
+
+async function runDriveUpload(root, credentials, directory, flipkart = false) {
+  const token = await drive.accessToken(credentials)
+  const images = drive.findImages(directory)
+  const rootName = basename(directory)
+  if (flipkart) return runFlipkartUpload(token, rootName, images)
+  // Captured once and mutated through this reference for the rest of the
+  // function, never through the module-level `driveRun` binding — see the
+  // note on `myRun` below for why that distinction matters.
+  const myRun = (driveRun = { status: 'running', folder: rootName, total: images.length, done: 0, skipped: 0, failed: 0, link: null, error: null })
+
+  const rootId = await drive.ensureFolder(token, rootName, null)
+  myRun.link = `https://drive.google.com/drive/folders/${rootId}`
+
+  // One Drive folder per local subfolder, and the names already in each so a
+  // re-run tops the folder up instead of uploading everything twice.
+  const folderIds = new Map([['', rootId]])
+  const existing = new Map([['', await drive.listFileNames(token, rootId)]])
+  const folderFor = async (relative) => {
+    if (folderIds.has(relative)) return folderIds.get(relative)
+    const parts = relative.split('/')
+    const parent = await folderFor(parts.slice(0, -1).join('/'))
+    const id = await drive.ensureFolder(token, parts[parts.length - 1], parent)
+    folderIds.set(relative, id)
+    existing.set(relative, await drive.listFileNames(token, id))
+    return id
+  }
+
+  for (const image of images) {
+    if (myRun.status === 'cancelled') break
+    try {
+      const parentId = await folderFor(image.folder)
+      if (existing.get(image.folder)?.has(image.name)) {
+        myRun.skipped += 1
+        continue
+      }
+      await drive.uploadFile(token, { file: image.file, name: image.name, parentId })
+      myRun.done += 1
+    } catch (error) {
+      myRun.failed += 1
+      myRun.error = error.message
+    }
+  }
+  if (myRun.status === 'running') myRun.status = 'finished'
+  saveRun(myRun)
+}
+
+const EXTENSION_BY_MIME = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }
+
+/**
+ * Uploads a flat set of in-memory images (base64) into one Drive folder.
+ *
+ * This is the canvas-combo path: those images only ever exist as blobs in the
+ * browser tab, never written to disk, so there is nothing on disk to point
+ * `runDriveUpload` at. The images are staged to a scratch temp directory only
+ * long enough to hand each one to the same multipart upload `runDriveUpload`
+ * uses, then the temp directory is removed.
+ */
+/**
+ * A batched upload of images that only exist in the browser.
+ *
+ * Canvas combos are never written to disk, so they arrive as base64 over HTTP.
+ * At 350 combos with their source photos that is far past any sane request
+ * size, so the browser sends them in batches against one open run, the same
+ * shape the extension queue uses.
+ *
+ * Each uploaded file's id is kept, because the spreadsheet that goes to
+ * Flipkart needs a fetchable URL per image and that can only be built from the
+ * id Drive hands back at upload time.
+ */
+async function startDriveImageRun(credentials, folderName, layout) {
+  // Drive gives the folder structure Flipkart's auto-fill reads; Cloudinary
+  // gives the URLs. Either alone is a useful run, so a disconnected Drive no
+  // longer blocks getting a listing sheet out of a finished batch of combos.
+  const useDrive = Boolean(credentials?.refreshToken)
+  const myRun = (driveRun = {
+    status: 'running',
+    folder: folderName,
+    total: 0,
+    done: 0,
+    skipped: 0,
+    failed: 0,
+    link: null,
+    error: null,
+  })
+
+  myRun.useDrive = useDrive
+  myRun.layout = layout
+  myRun.manifest = []
+  myRun.hosted = 0
+  myRun.hostError = null
+
+  if (useDrive) {
+    const token = await drive.accessToken(credentials)
+    const rootId = await drive.ensureFolder(token, folderName, null)
+    myRun.link = `https://drive.google.com/drive/folders/${rootId}`
+    myRun.rootId = rootId
+    if (layout !== 'flat') {
+      try {
+        await drive.makePublic(token, rootId)
+      } catch (error) {
+        myRun.error = `Uploading, but could not make the folder public: ${error.message}`
+      }
+    }
+  }
+  return myRun
+}
+
+async function uploadDriveImageBatch(credentials, groups) {
+  if (!driveRun || driveRun.status !== 'running') {
+    const error = new Error('No upload is open — start one first.')
+    error.expected = true
+    throw error
+  }
+  const myRun = driveRun
+  const token = myRun.useDrive ? await drive.accessToken(credentials) : null
+  // Deliberately not cached on the run: /api/drive serialises that object
+  // straight to the page, and the API secret has no business going there.
+  const host = cloudinary.readCredentials(root)
+  const staging = mkdtempSync(join(tmpdir(), 'combo-maker-drive-'))
+
+  try {
+    for (const group of groups) {
+      if (myRun.status === 'cancelled') break
+      const flat = myRun.layout === 'flat'
+      const sku = String(group.sku ?? 'combo')
+      let parentId = myRun.rootId
+      try {
+        if (token && !flat) parentId = await drive.ensureFolder(token, sku, myRun.rootId)
+      } catch (error) {
+        myRun.failed += group.files.length
+        myRun.error = error.message
+        continue
+      }
+
+      const entry = { sku, images: [] }
+      for (const [index, image] of group.files.entries()) {
+        if (myRun.status === 'cancelled') break
+        try {
+          const extension = EXTENSION_BY_MIME[image.type] ?? 'jpg'
+          // Flipkart only reads images numbered 1, 2, 3 inside the SKU folder.
+          const uploadName = flat ? image.name : `${index + 1}.${extension}`
+          let uploaded = null
+          if (token) {
+            const stagedPath = join(staging, `${myRun.done + myRun.failed}-${index}.${extension}`)
+            writeFileSync(stagedPath, Buffer.from(String(image.data ?? ''), 'base64'))
+            uploaded = await drive.uploadFile(token, { file: stagedPath, name: uploadName, parentId })
+          }
+          const hosted = await mirror(myRun, host, {
+            folder: folderFor(myRun, flat ? myRun.folder : `${myRun.folder}/${sku}`),
+            name: flat ? uploadName : String(index + 1),
+            data: String(image.data ?? ''),
+            type: image.type,
+          })
+          // Without Drive the hosted URL is the only one there is, so it fills
+          // both columns rather than leaving the row half empty.
+          entry.images.push({
+            name: uploadName,
+            id: uploaded?.id ?? null,
+            url: uploaded ? drive.directImageUrl(uploaded.id) : hosted,
+            hosted,
+          })
+          myRun.done += 1
+        } catch (error) {
+          myRun.failed += 1
+          myRun.error = error.message
+        }
+      }
+      if (entry.images.length) myRun.manifest.push(entry)
+    }
+  } finally {
+    rmSync(staging, { recursive: true, force: true })
+  }
+  // Saved per batch, not only at the end: a 350-combo run that dies halfway
+  // should still yield a sheet for the part that reached Drive.
+  saveRun(myRun)
+  return { done: myRun.done, failed: myRun.failed }
+}
+
+/**
+ * Cloudinary: the durable home for listing image URLs.
+ *
+ * Only ever reports whether a cloud name is configured, never the key or the
+ * secret — those go in one direction, from the page into the settings file.
+ */
+async function handleCloudinary(request, response, pathname, method) {
+  try {
+    if (pathname === '/api/cloudinary' && method === 'GET') {
+      const credentials = cloudinary.readCredentials(root)
+      sendJson(response, 200, {
+        configured: Boolean(credentials),
+        cloudName: credentials?.cloudName ?? '',
+        // Enough of the key to recognise the account, never enough to use it.
+        apiKeyHint: credentials ? `…${credentials.apiKey.slice(-4)}` : '',
+      })
+      return true
+    }
+
+    if (pathname === '/api/cloudinary' && method === 'POST') {
+      const body = await readJson(request)
+      // Any one of the three fields may hold the whole environment URL; if it
+      // does, it carries all three and is more trustworthy than the rest.
+      const pasted =
+        cloudinary.parseEnvironmentUrl(body.cloudName) ??
+        cloudinary.parseEnvironmentUrl(body.apiKey) ??
+        cloudinary.parseEnvironmentUrl(body.apiSecret)
+      const cloudName = pasted?.cloudName ?? String(body.cloudName ?? '').trim()
+      const apiKey = pasted?.apiKey ?? String(body.apiKey ?? '').trim()
+      const apiSecret = pasted?.apiSecret ?? String(body.apiSecret ?? '').trim()
+      if (!cloudName || !apiKey || !apiSecret) {
+        sendJson(response, 400, { error: 'Cloud name, API key and API secret are all needed.' })
+        return true
+      }
+      const check = await cloudinary.verifyCredentials({ cloudName, apiKey, apiSecret })
+      if (!check.ok) {
+        sendJson(response, 400, { error: check.message })
+        return true
+      }
+      cloudinary.writeCredentials(root, { cloudName, apiKey, apiSecret })
+      sendJson(response, 200, {
+        configured: true,
+        cloudName,
+        apiKeyHint: `…${apiKey.slice(-4)}`,
+        // The probe image that proved the upload works — shown as evidence
+        // rather than asking the user to take "connected" on trust.
+        checkUrl: check.url ?? null,
+      })
+      return true
+    }
+
+    if (pathname === '/api/cloudinary/disconnect' && method === 'POST') {
+      cloudinary.writeCredentials(root, { cloudName: '', apiKey: '', apiSecret: '' })
+      sendJson(response, 200, { configured: false, cloudName: '' })
+      return true
+    }
+
+    return false
+  } catch (error) {
+    sendJson(response, error.expected ? 400 : 500, { error: error.message })
+    return true
+  }
+}
+
+/** Google Drive: connect once, then mirror a folder of images into it. */
+async function handleDrive(request, response, pathname, method) {
+  try {
+    if (pathname === '/api/drive' && method === 'GET') {
+      const credentials = drive.readCredentials(root)
+      sendJson(response, 200, {
+        hasClient: Boolean(credentials),
+        connected: Boolean(credentials?.refreshToken),
+        redirectUri: redirectUri(),
+        run: driveRun,
+      })
+      return true
+    }
+
+    if (pathname === '/api/drive/client' && method === 'POST') {
+      const body = await readJson(request)
+      const clientId = String(body.clientId ?? '').trim()
+      const clientSecret = String(body.clientSecret ?? '').trim()
+      if (!clientId || !clientSecret) {
+        sendJson(response, 400, { error: 'Both the client ID and the secret are needed.' })
+        return true
+      }
+      drive.writeClient(root, { clientId, clientSecret })
+      sendJson(response, 200, { authUrl: drive.authUrl(clientId, redirectUri()) })
+      return true
+    }
+
+    // Google redirects the browser here with ?code=... after consent.
+    if (pathname === '/api/drive/callback' && method === 'GET') {
+      const query = new URL(request.url ?? '/', 'http://localhost').searchParams
+      const page = (title, detail) =>
+        `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
+        `<body style="font:14px system-ui;padding:48px;max-width:36em">` +
+        `<h2 style="font-weight:600">${title}</h2><p style="color:#555">${detail}</p></body>`
+      try {
+        const credentials = drive.readCredentials(root)
+        if (!credentials) throw new Error('No Google client is saved.')
+        if (query.get('error')) throw new Error(query.get('error'))
+        const refreshToken = await drive.exchangeCode({
+          clientId: credentials.clientId,
+          clientSecret: credentials.clientSecret,
+          code: query.get('code') ?? '',
+          redirectUri: redirectUri(),
+        })
+        drive.writeRefreshToken(root, refreshToken)
+        drive.clearTokenCache()
+        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        response.end(page('Google Drive connected', 'You can close this tab and go back to Combo Maker.'))
+      } catch (error) {
+        response.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' })
+        response.end(page('Could not connect Google Drive', error.message))
+      }
+      return true
+    }
+
+    /**
+     * Consent again using the client already on file.
+     *
+     * Disconnecting clears only the refresh token; the OAuth client survives
+     * in the settings file. Without this the sole way back is retyping an ID
+     * and secret the launcher can already see, which is a needless trip to the
+     * Google console after a single mis-click.
+     */
+    if (pathname === '/api/drive/reconnect' && method === 'POST') {
+      const credentials = drive.readCredentials(root)
+      if (!credentials?.clientId) {
+        sendJson(response, 400, { error: 'No OAuth client saved yet — paste the ID and secret once.' })
+        return true
+      }
+      sendJson(response, 200, { authUrl: drive.authUrl(credentials.clientId, redirectUri()) })
+      return true
+    }
+
+    if (pathname === '/api/drive/disconnect' && method === 'POST') {
+      drive.forget(root)
+      drive.clearTokenCache()
+      sendJson(response, 200, { connected: false })
+      return true
+    }
+
+    if (pathname === '/api/drive/scan' && method === 'POST') {
+      const body = await readJson(request)
+      sendJson(response, 200, drive.folderStats(resolve(String(body.folder ?? '').trim())))
+      return true
+    }
+
+    if (pathname === '/api/drive/images/start' && method === 'POST') {
+      const credentials = drive.readCredentials(root)
+      // Either destination is enough on its own: Drive for the folder layout,
+      // Cloudinary for the URLs the listing sheet is made of.
+      if (!credentials?.refreshToken && !cloudinary.readCredentials(root)) {
+        sendJson(response, 400, { error: 'Connect Google Drive or Cloudinary first.' })
+        return true
+      }
+      if (driveRun?.status === 'running') {
+        sendJson(response, 400, { error: 'An upload is already running.' })
+        return true
+      }
+      const body = await readJson(request)
+      const run = await startDriveImageRun(
+        credentials,
+        String(body.folderName ?? '').trim() || 'Combo Maker exports',
+        String(body.layout ?? 'combo'),
+      )
+      sendJson(response, 200, { started: true, folder: run.folder, link: run.link })
+      return true
+    }
+
+    if (pathname === '/api/drive/images/batch' && method === 'POST') {
+      const credentials = drive.readCredentials(root)
+      const body = await readJson(request)
+      const groups = Array.isArray(body.groups) ? body.groups : []
+      if (driveRun?.status === 'running') driveRun.total += groups.reduce((sum, g) => sum + (g.files?.length ?? 0), 0)
+      sendJson(response, 200, await uploadDriveImageBatch(credentials, groups))
+      return true
+    }
+
+    if (pathname === '/api/drive/images/done' && method === 'POST') {
+      if (driveRun?.status === 'running') driveRun.status = 'finished'
+      saveRun(driveRun)
+      sendJson(response, 200, { run: driveRun })
+      return true
+    }
+
+    // The spreadsheet Flipkart's bulk listing wants: one row per SKU, each
+    // image as a URL it can actually fetch.
+    if (pathname === '/api/drive/sheet.xlsx' && method === 'GET') {
+      const manifest = driveRun?.manifest
+      if (!manifest?.length) {
+        sendJson(response, 404, { error: 'Nothing uploaded yet — run a Drive upload first.' })
+        return true
+      }
+      let XLSX
+      try {
+        XLSX = (await import('xlsx')).default
+      } catch {
+        sendJson(response, 500, { error: 'The xlsx package is missing — run "npm install" and restart.' })
+        return true
+      }
+
+      const widest = Math.max(...manifest.map((entry) => entry.images.length))
+      const header = ['SKU', 'Hero Image URL']
+      for (let index = 2; index <= widest; index++) header.push(`Image ${index} URL`)
+      header.push('Public Folder URL')
+
+      const rows = [header]
+      for (const entry of manifest) {
+        const row = [entry.sku]
+        // The mirrored URL is the one meant to be pasted into a listing; the
+        // Drive URL is what there is when Cloudinary was not configured or
+        // that one image failed to mirror.
+        for (let index = 0; index < widest; index++) {
+          const image = entry.images[index]
+          row.push(image?.hosted || image?.url || '')
+        }
+        row.push(driveRun.link ?? '')
+        rows.push(row)
+      }
+
+      const book = XLSX.utils.book_new()
+      const sheet = XLSX.utils.aoa_to_sheet(rows)
+      sheet['!cols'] = header.map((name, index) => ({ wch: index === 0 ? 34 : 58 }))
+      XLSX.utils.book_append_sheet(book, sheet, 'Listings')
+      const buffer = XLSX.write(book, { bookType: 'xlsx', type: 'buffer' })
+
+      response.writeHead(200, {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="${(driveRun.folder || 'combo-maker').replace(/[^\w.-]+/g, '-')}-listings.xlsx"`,
+        'Content-Length': buffer.length,
+        ...CORS,
+      })
+      response.end(buffer)
+      return true
+    }
+
+    if (pathname === '/api/drive/upload' && method === 'POST') {
+      const credentials = drive.readCredentials(root)
+      if (!credentials?.refreshToken) {
+        sendJson(response, 400, { error: 'Connect Google Drive first.' })
+        return true
+      }
+      if (driveRun?.status === 'running') {
+        sendJson(response, 400, { error: 'An upload is already running.' })
+        return true
+      }
+      const body = await readJson(request)
+      const directory = resolve(String(body.folder ?? '').trim())
+      // Fails here if the folder is wrong, rather than after answering OK.
+      const stats = drive.folderStats(directory)
+      // Not awaited: the browser follows progress by polling.
+      runDriveUpload(root, credentials, directory, Boolean(body.flipkart)).catch((error) => {
+        driveRun = { ...(driveRun ?? {}), status: 'failed', error: error.message }
+      })
+      sendJson(response, 200, { started: true, ...stats })
+      return true
+    }
+
+    if (pathname === '/api/drive/cancel' && method === 'POST') {
+      if (driveRun?.status === 'running') driveRun.status = 'cancelled'
+      saveRun(driveRun)
+      sendJson(response, 200, { run: driveRun })
+      return true
+    }
+
+    sendJson(response, 404, { error: 'Unknown Drive route.' })
+    return true
+  } catch (error) {
+    sendJson(response, error.expected ? 400 : 500, { error: error.message })
+    if (!error.expected) console.error(`  Drive error on ${pathname}:`, error)
+    return true
+  }
+}
+
 /** Saved setups, so a refresh is not the end of an afternoon's work. */
 async function handleTemplates(request, response, pathname, method) {
   try {
@@ -513,6 +1163,8 @@ async function handleApi(request, response, pathname) {
 
   if (pathname.startsWith('/api/queue')) return handleQueue(request, response, pathname, method)
   if (pathname.startsWith('/api/templates')) return handleTemplates(request, response, pathname, method)
+  if (pathname.startsWith('/api/drive')) return handleDrive(request, response, pathname, method)
+  if (pathname.startsWith('/api/cloudinary')) return handleCloudinary(request, response, pathname, method)
 
   const runMatch = /^\/api\/ai\/runs\/([\w-]+)(\/cancel)?$/.exec(pathname)
 

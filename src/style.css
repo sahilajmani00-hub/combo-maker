@@ -57,6 +57,8 @@ h1 em { color: var(--orange); font-style: italic; }
 .panel-heading > div { display: flex; gap: 14px; align-items: baseline; }
 h2 { font-size: 25px; font-weight: 500; letter-spacing: -.03em; }
 .count-label { color: var(--muted); font: 11px Arial, sans-serif; text-transform: uppercase; letter-spacing: .1em; white-space: nowrap; }
+.heading-actions { display: flex; align-items: baseline; gap: 14px; }
+.heading-actions .link-button:disabled { opacity: .4; cursor: not-allowed; text-decoration-color: transparent; }
 
 /* ---------- dropzone + product list ---------- */
 .dropzone { min-height: 185px; border: 1px dashed #adb7a7; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font: 13px Arial, sans-serif; transition: .2s ease; text-align: center; padding: 20px; }
@@ -78,7 +80,7 @@ input.product-name:focus { border-color: var(--orange); background: #fff; color:
 .recipe-meta strong { overflow-wrap: anywhere; }
 .product-set { flex: none; color: #9b9f95; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .row-actions { display: flex; gap: 2px; flex: none; }
-.icon-button { border: 1px solid transparent; background: transparent; color: #92988c; width: 26px; height: 26px; display: grid; place-items: center; font-size: 13px; line-height: 1; }
+.icon-button { border: 1px solid transparent; background: transparent; color: #92988c; width: 26px; height: 26px; display: grid; place-items: center; font-size: 13px; line-height: 1; text-decoration: none; }
 .icon-button:hover:not(:disabled) { border-color: var(--line); color: var(--ink); background: #fff; }
 .icon-button:disabled { opacity: .25; cursor: not-allowed; }
 .icon-button.remove-button { font-size: 20px; }
@@ -111,6 +113,8 @@ input.product-name:focus { border-color: var(--orange); background: #fff; color:
 .slider-value { font: 11px Arial, sans-serif; color: var(--ink); min-width: 34px; text-align: right; }
 .toggle { display: flex; gap: 10px; align-items: start; font: 12px/1.4 Arial, sans-serif; color: var(--muted); padding: 7px 0; cursor: pointer; }
 .toggle input { accent-color: var(--orange); margin: 2px 0 0; flex: none; }
+.toggle:has(input:disabled) { opacity: .4; cursor: not-allowed; }
+.slider-row:has(input:disabled) { opacity: .4; }
 .toggle b { display: block; color: var(--ink); font-weight: 600; }
 .recipe-meta { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e5e4da; padding: 10px 0; font: 12px Arial, sans-serif; color: var(--muted); }
 .recipe-meta strong { color: var(--ink); font-weight: 600; text-align: right; }
@@ -185,6 +189,7 @@ textarea.text-input { resize: vertical; }
 .result-actions { display: flex; gap: 10px; flex: none; }
 .download-button { gap: 22px; padding: 13px 16px; }
 .download-button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.result-chips { align-items: center; margin-right: 6px; }
 .download-button span { font-size: 18px; }
 .result-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 18px; }
 .result-card { border: 1px solid var(--line); background: var(--paper); padding: 14px; display: flex; flex-direction: column; gap: 10px; }

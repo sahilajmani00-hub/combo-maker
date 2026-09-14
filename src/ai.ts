@@ -259,6 +259,88 @@ export const reversePrompts = (payload: { model: string; folder: string; limit?:
     postJson(payload),
   )
 
+export type DriveRun = {
+  status: 'running' | 'finished' | 'cancelled' | 'failed'
+  folder: string
+  total: number
+  done: number
+  skipped: number
+  failed: number
+  link: string | null
+  error: string | null
+  hosted?: number
+  hostError?: string | null
+} | null
+
+export type DriveStatus = {
+  hasClient: boolean
+  connected: boolean
+  redirectUri: string
+  run: DriveRun
+}
+
+export const driveStatus = () => request<DriveStatus>('/api/drive')
+
+export const saveDriveClient = (clientId: string, clientSecret: string) =>
+  request<{ authUrl: string }>('/api/drive/client', postJson({ clientId, clientSecret }))
+
+/** Re-consent with the OAuth client already saved, no retyping. */
+export const reconnectDrive = () => request<{ authUrl: string }>('/api/drive/reconnect', postJson({}))
+
+export const disconnectDrive = () => request<{ connected: boolean }>('/api/drive/disconnect', postJson({}))
+
+export const scanDriveFolder = (folder: string) =>
+  request<{ name: string; images: number; subfolders: number }>('/api/drive/scan', postJson({ folder }))
+
+export const startDriveUpload = (folder: string, flipkart = false) =>
+  request<{ started: boolean; name: string; images: number }>('/api/drive/upload', postJson({ folder, flipkart }))
+
+export const cancelDriveUpload = () => request<{ run: DriveRun }>('/api/drive/cancel', postJson({}))
+
+/** One SKU's images, in the order they should be numbered. */
+export type DriveGroup = { sku: string; files: { name: string; type: string; data: string }[] }
+
+/**
+ * A batched Drive upload of images that only exist in the browser.
+ *
+ * Start once, send batches, finish — the same shape the extension queue uses,
+ * because a few hundred combos with their source photos is far more than one
+ * request can carry.
+ */
+export const startDriveImages = (folderName: string, layout: string) =>
+  request<{ started: boolean; folder: string; link: string | null }>('/api/drive/images/start', postJson({ folderName, layout }))
+
+export const sendDriveImages = (groups: DriveGroup[]) =>
+  request<{ done: number; failed: number }>('/api/drive/images/batch', postJson({ groups }))
+
+export const finishDriveImages = () => request<{ run: DriveRun }>('/api/drive/images/done', postJson({}))
+
+/** Where the spreadsheet of SKUs and image URLs is served from. */
+export type CloudinaryStatus = {
+  configured: boolean
+  cloudName: string
+  apiKeyHint?: string
+  /** URL of the test image the connection check uploaded, as proof it works. */
+  checkUrl?: string | null
+}
+
+/**
+ * Cloudinary holds the copy the listing URLs point at.
+ *
+ * Drive keeps the folder structure Flipkart's auto-fill reads, but its image
+ * URLs run through an undocumented Google path; these are the ones meant to
+ * still resolve days later when the listing is finally built.
+ */
+export const cloudinaryStatus = () => request<CloudinaryStatus>('/api/cloudinary')
+
+export const saveCloudinary = (cloudName: string, apiKey: string, apiSecret: string) =>
+  request<CloudinaryStatus>('/api/cloudinary', postJson({ cloudName, apiKey, apiSecret }))
+
+export const disconnectCloudinary = () =>
+  request<CloudinaryStatus>('/api/cloudinary/disconnect', postJson({}))
+
+export const LISTING_SHEET_URL = '/api/drive/sheet.xlsx'
+
 export type Estimate = { credits: number; usd: number }
 
 /** Cost of a single generation with these settings, straight from the API. */
