@@ -13,7 +13,70 @@ There is no public signup and no shared photo library.
 AI, Google Drive, Cloudinary, and saved disk templates remain in the local app.
 The hosted server does not expose any of the local app's APIs or credentials.
 
-## Deploy on Render
+## Deploy on your Hostinger VPS
+
+The selected host is the existing **Hostinger VPS**. No new hosting subscription is
+needed. Deployment is waiting for the VPS SSH connection details and the dashboard's
+domain or subdomain. Do not replace an existing site or reinstall the VPS operating system.
+
+The Dockerfile and `compose.hostinger.yaml` run the invite-only server with a persistent
+account volume. Hostinger supports Docker on VPS; see its
+[Docker Manager guide](https://www.hostinger.com/support/12040815-how-to-deploy-your-first-container-with-hostinger-docker-manager/).
+
+### Server setup
+
+1. Connect to the VPS through SSH and inspect its existing Docker services, web server,
+   available ports, disk space, and domain configuration.
+2. Use an isolated checkout of this repository, branch `add-github-pages-docs`.
+3. Set `APP_URL` to the exact HTTPS origin users will visit. For example:
+
+   ```sh
+   export APP_URL=https://combos.example.com
+   docker compose -f compose.hostinger.yaml up -d --build
+   ```
+
+4. Configure that domain's HTTPS reverse proxy to `http://127.0.0.1:4174`, using the
+   server's existing hosting panel or web server. The domain's DNS must point to the
+   VPS. Configure TLS before opening the login page.
+5. Create your invitation in the app container:
+
+   ```sh
+   docker compose -f compose.hostinger.yaml exec app node tools/invite.mjs person@example.com
+   ```
+
+Replace the example origin and email. Keep `APP_URL` exported for subsequent Compose
+commands, including `exec`; on a new SSH session, export it again. Docker retains it
+inside the created container for restarts. Use the same origin for invitations and login.
+
+The application listens on port 10000 inside Docker and is exposed **only on
+127.0.0.1:4174** on the VPS. The existing HTTPS proxy handles public traffic. If that
+local port is occupied, choose an unused port in the Compose mapping and proxy together.
+The `/healthz` endpoint is available for health checks.
+
+### Account storage and updates
+
+The Compose project name is fixed as `combo-maker-private`; changing the checkout
+folder will not silently select another account volume. SQLite lives in
+`/data/accounts.sqlite` in the `combo_accounts` named volume. Keep that volume across
+updates. **Do not use `docker compose down -v`**, which deletes stored accounts.
+This deployment uses one app instance. Back up SQLite before moving its volume.
+
+To deploy an update from the same checkout after reviewing the incoming changes:
+
+```sh
+git pull --ff-only origin add-github-pages-docs
+docker compose -f compose.hostinger.yaml up -d --build
+```
+
+### Verify before sharing
+
+Check that `/` and a real `/assets/...js` URL redirect to `/login` without a session.
+Activate a test invitation, sign in, create and download a combo, sign out, and verify
+access is rejected. Restart and redeploy once to confirm accounts persist. Revoke the
+test user and verify their session no longer works. Desktop and mobile browser checks
+remain part of the live deployment verification.
+
+## Alternative: Render
 
 The repository includes `render.yaml` and a Dockerfile. The proposed service uses
 Render's **Starter paid web service and a 1 GB persistent disk**. Review the charges
@@ -37,7 +100,8 @@ See [Render Blueprints](https://render.com/docs/blueprint-spec) for hosting conf
 
 ## Invite someone
 
-Run in the **deployed service's Shell**, so it uses the deployed account database:
+Run in the **deployed server's shell** with the same `APP_URL` and `DATA_DIR` as the app,
+so it uses the deployed account database (for Docker, use the container command above):
 
 ```sh
 node tools/invite.mjs person@example.com
