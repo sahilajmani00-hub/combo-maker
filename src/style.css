@@ -212,3 +212,19 @@ textarea.text-input { resize: vertical; }
   .result-heading { align-items: stretch; flex-direction: column; }
   footer { gap: 10px; flex-direction: column; }
 }
+
+/* Server integrations are available through the local launcher. */
+.static-host .server-feature,
+.static-host .mode-switch,
+.static-host #get-product-urls,
+.static-host #copy-all-urls,
+.static-host #canvas-layout-options,
+.static-host #canvas-sheet,
+.static-host #canvas-drive-upload,
+.static-host #canvas-drive-stop,
+.static-host #canvas-drive-copy { display: none !important; }
+.hosting-note { line-height: 1.6; margin: 0 0 24px; color: var(--muted); }
+.hosting-note a { color: inherit; text-decoration: underline; }
+
+.account-actions { display: flex; align-items: center; gap: 18px; }
+@media (max-width: 480px) { .account-actions .local-pill { display: none; } .heading-actions { flex-wrap: wrap; gap: 8px; } }

@@ -1,0 +1,13 @@
+.git
+node_modules
+dist
+docs
+data
+.env
+*.local
+ai-combos
+templates
+extension
+.active-queue
+.last-drive-run.json
+hosted-dist

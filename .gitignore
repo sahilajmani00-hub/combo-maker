@@ -40,3 +40,10 @@ dist-ssr
 
 # Last Drive upload's manifest, so the listing sheet survives a restart
 /.last-drive-run.json
+
+# Private hosted accounts, invitation hashes, and sessions
+/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+hosted-dist

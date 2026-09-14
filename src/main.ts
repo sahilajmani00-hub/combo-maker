@@ -94,6 +94,10 @@ type Result = {
 }
 type Tab = 'canvas' | 'ai'
 
+const INVITE_PORTAL = import.meta.env.VITE_INVITE_PORTAL === 'true'
+const STATIC_HOST = import.meta.env.VITE_STATIC_HOST === 'true'
+if (STATIC_HOST) document.documentElement.classList.add('static-host')
+
 const MAX_PRODUCTS = 60
 
 const BACKGROUNDS = [
@@ -229,7 +233,7 @@ const modeOptionsHtml = () =>
 app.innerHTML = `
   <header class="topbar">
     <a class="brand" href="."><span class="brand-mark">CM</span><span>Combo Maker</span></a>
-    <span class="local-pill"><span class="status-dot"></span>Runs locally</span>
+    <div class="account-actions">${INVITE_PORTAL ? '<form method="post" action="/auth/logout"><button class="link-button" type="submit">Sign out</button></form>' : ''}<span class="local-pill"><span class="status-dot"></span>${STATIC_HOST ? 'Runs in your browser' : 'Runs locally'}</span></div>
   </header>
   <main>
     <section class="intro">
@@ -241,6 +245,7 @@ app.innerHTML = `
       <div class="intro-note"><span>01</span><p>Your files stay in this browser.<br>No upload, no account, no fuss.</p></div>
     </section>
 
+    ${STATIC_HOST ? '<p class="hosting-note">Create and download combos on your phone, tablet, or computer. Photos stay in this browser and are not saved after you close or refresh the page. AI, saved templates, Google Drive, and image hosting require the local app. <a href="https://github.com/sahilajmani00-hub/combo-maker#run-it">Local app setup</a> · <a href="./privacy.html">Privacy policy</a></p>' : ''}
     <div class="mode-switch" role="tablist" aria-label="Combo builder">
       <button class="mode-tab selected" data-tab="canvas" role="tab" aria-selected="true"><b>Canvas combos</b><span>Arrange the real photos side by side. Offline and free.</span></button>
       <button class="mode-tab" data-tab="ai" role="tab" aria-selected="false"><b>AI angle combos</b><span>Higgsfield re-shoots each set from several camera angles.</span></button>
@@ -265,8 +270,8 @@ app.innerHTML = `
         </label>
         <div id="product-list" class="product-list"></div>
 
-        <div class="rule"></div>
-        <div class="field">
+        <div class="rule server-feature"></div>
+        <div class="field server-feature">
           <span class="field-label">Templates</span>
           <div class="template-row">
             <input id="template-name" class="text-input" type="text" placeholder="Name this setup" spellcheck="false">
@@ -276,8 +281,8 @@ app.innerHTML = `
           <p class="mode-copy">Saves your photos and every setting to disk, so a refresh — or a new browser — picks up exactly where you left off. Saving over a name replaces it.</p>
         </div>
 
-        <div class="rule"></div>
-        <div class="field">
+        <div class="rule server-feature"></div>
+        <div class="field server-feature">
           <span class="field-label">Google Drive</span>
           <div id="drive-connect" class="connect-box">
             <div id="drive-reconnect-row" class="hidden">
@@ -297,8 +302,8 @@ app.innerHTML = `
           </div>
         </div>
 
-        <div class="rule"></div>
-        <div class="field">
+        <div class="rule server-feature"></div>
+        <div class="field server-feature">
           <span class="field-label">Durable image URLs</span>
           <div id="cloudinary-connect" class="connect-box">
             <div class="connect-fields">
@@ -1911,6 +1916,7 @@ let drivePoll: ReturnType<typeof setTimeout> | null = null
  * Google consent tab).
  */
 async function refreshDrive() {
+  if (STATIC_HOST) return
   try {
     ai.drive = await driveStatus()
   } catch {
@@ -2686,7 +2692,7 @@ el('#ai-queue-stop').addEventListener('click', () => {
   el('#ai-queue-text').textContent = 'Stopping...'
 })
 
-fetchConfig()
+if (!STATIC_HOST) fetchConfig()
   .then((config) => {
     ai.config = config
     // Fall to whatever this account can actually reach rather than leaving the
@@ -2706,15 +2712,17 @@ fetchConfig()
 
 refresh()
 
-void refreshTemplates()
-void refreshDrive()
-void refreshCloudinary()
+if (!STATIC_HOST) {
+  void refreshTemplates()
+  void refreshDrive()
+  void refreshCloudinary()
+}
 
 // The extension can put one image on a different surface, and can have a model
 // rewrite one prompt from its reference. Both need wording that lives here
 // rather than in the launcher, so it is offered on each load — which also
 // upgrades a queue that was built before either feature existed.
-void sendWording({
+if (!STATIC_HOST) void sendWording({
   backdrops: backdropMenu(),
   angles: ANGLES.map((angle) => ({ id: angle.id, camera: angle.camera })),
   templates: backdropTemplates(),

@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "start": "node tools/serve.mjs"
+    "start": "node tools/serve.mjs",
+    "build:hosted": "tsc && vite build --mode hosted --outDir hosted-dist",
+    "start:hosted": "node tools/portal.mjs",
+    "invite": "node tools/invite.mjs",
+    "test:auth": "node --test test/portal.test.mjs"
   },
   "devDependencies": {
     "typescript": "~6.0.2",
@@ -15,5 +19,8 @@
   },
   "dependencies": {
     "xlsx": "^0.18.5"
+  },
+  "engines": {
+    "node": ">=24"
   }
 }
