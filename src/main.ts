@@ -292,6 +292,7 @@ app.innerHTML = `
         <div class="recipe-meta"><span>Layout</span><strong id="layout-label"></strong></div>
         <div class="recipe-meta"><span>Output size</span><strong id="size-label"></strong></div>
         <div class="recipe-meta"><span>Combos to build</span><strong id="combo-count"></strong></div>
+        <div class="recipe-meta"><span>Example name</span><strong id="combo-example">—</strong></div>
 
         <button id="generate-button" class="primary-button" disabled><span id="generate-text">Generate combos</span><span>&rarr;</span></button>
         <p id="hint" class="hint"></p>
@@ -417,6 +418,7 @@ app.innerHTML = `
         <div class="recipe-meta"><span>Combos</span><strong id="ai-combo-count">—</strong></div>
         <div class="recipe-meta"><span>Angles each</span><strong id="ai-angle-count">—</strong></div>
         <div class="recipe-meta"><span>Images to generate</span><strong id="ai-job-count">—</strong></div>
+        <div class="recipe-meta"><span>Example folder</span><strong id="ai-combo-example">—</strong></div>
         <div class="recipe-meta"><span>Estimated cost</span><strong id="ai-cost">—</strong></div>
 
         <button id="ai-generate-button" class="primary-button" disabled><span id="ai-generate-text">Generate with Higgsfield</span><span>&rarr;</span></button>
@@ -514,6 +516,11 @@ function renderControls() {
   el('#combo-count').textContent = groups.length
     ? `${groups.length}${leftover ? ` (+${leftover} spare)` : ''}`
     : '—'
+  // Seeing the first one is the quickest way to tell whether the names are worth
+  // fixing before a run of several hundred folders is written.
+  el('#combo-example').textContent = groups.length
+    ? comboName(groups[0].map((product) => product.file.name), state.format === 'png' ? 'png' : 'jpg', new Set())
+    : '—'
 
   generateButton.disabled = busy || groups.length === 0
   if (busy) return
@@ -535,8 +542,30 @@ function renderControls() {
   }
 }
 
+/** The part of a filename a combo name is actually built from. */
+const nameStem = (fileName: string) => fileName.replace(/\.[a-z0-9]+$/i, '')
+
+/**
+ * Renames a product.
+ *
+ * Combo names — the export filename and the folder the extension writes into —
+ * are built by joining these with "&", so "pasted-01&pasted-06" is what an
+ * unnamed paste turns into. Being able to fix that here is the difference
+ * between a readable output folder and 378 unreadable ones.
+ */
+function renameProduct(id: number, stem: string) {
+  const product = state.products.find((item) => item.id === id)
+  if (!product) return
+  const extension = /\.[a-z0-9]+$/i.exec(product.file.name)?.[0] ?? ''
+  // The File itself is renamed rather than kept alongside a label, so every
+  // path that already reads file.name — naming, templates, queue — follows.
+  product.file = new File([product.file], `${stem.trim() || 'image'}${extension}`, { type: product.file.type })
+}
+
 function renderProducts() {
   el('#count-label').textContent = plural(state.products.length, 'image')
+  // Rewriting the list while a name is being typed would steal the caret.
+  if (productList.contains(document.activeElement)) return
   const perSet = state.comboSize
   productList.innerHTML = state.products.length
     ? state.products
@@ -550,7 +579,7 @@ function renderProducts() {
           return `<div class="product-row">
             <img src="${product.url}" alt="Product ${index + 1}">
             <span class="product-number">${String(index + 1).padStart(2, '0')}</span>
-            <span class="product-name">${escapeHtml(product.file.name)}</span>
+            <input class="product-name" type="text" data-rename="${product.id}" value="${escapeHtml(nameStem(product.file.name))}" spellcheck="false" aria-label="Name for product ${index + 1}">
             <span class="product-set">${badge}</span>
             <span class="row-actions">
               <button class="icon-button" data-move="up" data-id="${product.id}" ${index === 0 ? 'disabled' : ''} aria-label="Move up">&uarr;</button>
@@ -771,6 +800,14 @@ document.addEventListener('paste', (event) => {
 fileInput.addEventListener('change', () => {
   if (fileInput.files) addFiles(fileInput.files)
   fileInput.value = ''
+})
+
+productList.addEventListener('input', (event) => {
+  const input = event.target as HTMLInputElement
+  if (!input.dataset.rename) return
+  renameProduct(Number(input.dataset.rename), input.value)
+  renderControls()
+  renderAiControls()
 })
 
 productList.addEventListener('click', (event) => {
@@ -1143,6 +1180,9 @@ function renderAiControls() {
   el('#ai-combo-count').textContent = groups.length ? String(groups.length) : '—'
   el('#ai-angle-count').textContent = ai.angles.length ? String(ai.angles.length) : '—'
   el('#ai-job-count').textContent = jobs ? String(jobs) : '—'
+  el('#ai-combo-example').textContent = groups.length
+    ? comboFolder(groups[0].map((product) => product.file.name), new Set())
+    : '—'
   // Priced per generation by the API, so the run total is just a multiplication.
   el('#ai-cost').textContent = ai.estimate && jobs
     ? `${(ai.estimate.credits * jobs).toLocaleString(undefined, { maximumFractionDigits: 0 })} credits · $${(ai.estimate.usd * jobs).toFixed(2)}`

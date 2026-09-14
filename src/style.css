@@ -72,7 +72,10 @@ h2 { font-size: 25px; font-weight: 500; letter-spacing: -.03em; }
 .product-row { display: flex; align-items: center; min-height: 58px; border-top: 1px solid var(--line); gap: 12px; font: 12px Arial, sans-serif; }
 .product-row img { width: 49px; height: 49px; object-fit: contain; background: #f0eee7; flex: none; }
 .product-number { color: var(--orange); font-weight: 700; flex: none; }
-.product-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; color: var(--muted); }
+input.product-name { flex: 1; min-width: 0; border: 1px solid transparent; background: transparent; color: var(--muted); padding: 5px 7px; font: 12px Arial, sans-serif; }
+input.product-name:hover { border-color: var(--line); background: #fff; }
+input.product-name:focus { border-color: var(--orange); background: #fff; color: var(--ink); outline: none; }
+.recipe-meta strong { overflow-wrap: anywhere; }
 .product-set { flex: none; color: #9b9f95; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .row-actions { display: flex; gap: 2px; flex: none; }
 .icon-button { border: 1px solid transparent; background: transparent; color: #92988c; width: 26px; height: 26px; display: grid; place-items: center; font-size: 13px; line-height: 1; }

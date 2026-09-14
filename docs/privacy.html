@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Combo Maker Privacy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600&family=Inter:wght@500;600;700&display=swap">
+<style>
+  :root {
+    --ink: #1c1f1a;
+    --muted: #5b6156;
+    --line: #dcdfd6;
+    --paper: #fbfaf6;
+    --accent: #4a6b4f;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e9ece5;
+      --muted: #a3aa9c;
+      --line: #35392f;
+      --paper: #16180f;
+      --accent: #8fb894;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+    font-size: 17px;
+    line-height: 1.65;
+  }
+  .wrap {
+    max-width: 640px;
+    margin: 0 auto;
+    padding-block: 64px 80px;
+    padding-inline: 20px;
+  }
+  .kicker {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(28px, 5vw, 38px);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+    text-wrap: balance;
+    margin: 0 0 8px;
+  }
+  .updated {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0 0 40px;
+  }
+  .lede {
+    font-size: 19px;
+    color: var(--ink);
+    margin: 0 0 40px;
+    padding-bottom: 36px;
+    border-bottom: 1px solid var(--line);
+  }
+  h2 {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 40px 0 12px;
+  }
+  p { margin: 0 0 16px; }
+  code {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 0.88em;
+    background: var(--line);
+    padding: 0.12em 0.4em;
+    border-radius: 4px;
+  }
+  .fact-row {
+    display: flex;
+    gap: 14px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .fact-row:last-child { border-bottom: none; }
+  .fact-label {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    flex: 0 0 108px;
+    padding-top: 2px;
+  }
+  .fact-value { flex: 1; }
+  footer {
+    margin-top: 56px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  footer a { color: var(--accent); }
+  .back {
+    display: inline-block;
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    color: var(--muted);
+    text-decoration: none;
+    margin-bottom: 28px;
+  }
+  .back:hover { color: var(--accent); }
+
+  @media (max-width: 480px) {
+    .fact-row { flex-direction: column; gap: 4px; }
+    .fact-label { flex: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <a class="back" href="./">&larr; Combo Maker</a>
+    <p class="kicker">Privacy Policy</p>
+    <h1>Combo Maker</h1>
+    <p class="updated">Last updated September 2026</p>
+
+    <p class="lede">Combo Maker is a personal tool, built and used by one person, that composes
+    product photos into combo images and uploads them to that same person's own Google Drive.
+    It has no other users and no server of its own &mdash; everything runs on the owner's machine.</p>
+
+    <h2>What it can see in Google Drive</h2>
+    <p>Combo Maker connects to Google Drive using the <code>drive.file</code> scope. This scope is
+    per-file: it only grants access to folders and files that Combo Maker itself creates through
+    the connection. It cannot list, read, or modify anything already in the connected account's
+    Drive, and it never requests broader access.</p>
+
+    <div class="fact-row">
+      <div class="fact-label">Can access</div>
+      <div class="fact-value">Folders and files Combo Maker creates during an upload.</div>
+    </div>
+    <div class="fact-row">
+      <div class="fact-label">Cannot access</div>
+      <div class="fact-value">Any pre-existing file, folder, or shared drive in the account.</div>
+    </div>
+    <div class="fact-row">
+      <div class="fact-label">Stored where</div>
+      <div class="fact-value">Authorization tokens live in a local config file on the owner's own machine.</div>
+    </div>
+    <div class="fact-row">
+      <div class="fact-label">Shared with</div>
+      <div class="fact-value">No one. Nothing is sold, transmitted, or shared with any third party.</div>
+    </div>
+
+    <h2>Data this tool handles</h2>
+    <p>The only data involved is the product images the owner supplies and the folders it creates
+    to hold them on upload. No account data, analytics, or usage information is collected.</p>
+
+    <h2>Changes</h2>
+    <p>If this policy changes, the update will be reflected on this same page.</p>
+
+    <footer>
+      Questions: <a href="mailto:sahilajmani00@gmail.com">sahilajmani00@gmail.com</a>
+    </footer>
+  </div>
+</body>
+</html>
