@@ -37,3 +37,6 @@ dist-ssr
 
 # Nested clone of the earlier imagecombomaker repo — not part of this project
 /imagecombomaker/
+
+# Last Drive upload's manifest, so the listing sheet survives a restart
+/.last-drive-run.json

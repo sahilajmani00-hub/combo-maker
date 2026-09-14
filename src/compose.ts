@@ -3,7 +3,7 @@
 import type { PreparedImage } from './imageprep.ts'
 
 export type ComboSize = 2 | 3 | 4
-export type LayoutId = 'row' | 'stack' | 'grid' | 'feature'
+export type LayoutId = 'row' | 'stack' | 'grid' | 'feature' | 'filled'
 export type RatioId = 'square' | 'portrait45' | 'portrait34'
 export type AlignId = 'center' | 'bottom'
 
@@ -31,19 +31,66 @@ export const RATIOS: Record<RatioId, { width: number; height: number; label: str
 
 export const LAYOUTS: Record<ComboSize, { id: LayoutId; label: string }[]> = {
   2: [
+    { id: 'filled', label: 'Filled grid' },
     { id: 'row', label: 'Side by side' },
     { id: 'stack', label: 'Stacked' },
   ],
   3: [
+    { id: 'filled', label: 'Filled grid' },
     { id: 'row', label: '3 across' },
     { id: 'feature', label: '1 big + 2' },
     { id: 'stack', label: 'Stacked' },
   ],
   4: [
+    { id: 'filled', label: 'Filled grid' },
     { id: 'grid', label: '2 × 2 grid' },
     { id: 'row', label: '4 across' },
     { id: 'feature', label: '1 big + 3' },
   ],
+}
+
+/**
+ * The filled grid ignores margin, gap, trim and size-matching.
+ *
+ * Those exist to stop cut-out products floating at odd sizes, which is the
+ * wrong problem here: every cell is covered edge to edge by its photo, so
+ * there is no empty space left for them to act on.
+ */
+export const isFilled = (layout: LayoutId) => layout === 'filled'
+
+/**
+ * Equal cells covering the whole canvas, no gaps.
+ *
+ * Two sits side by side, four is the obvious 2x2, and three takes the classic
+ * collage shape — one tall cell with two stacked beside it — because three
+ * equal columns on a square canvas crops each photo to a sliver.
+ */
+function filledCells(size: ComboSize, area: Rect): Rect[] {
+  const { x, y, width, height } = area
+  if (size === 2) {
+    const half = width / 2
+    return [
+      { x, y, width: half, height },
+      { x: x + half, y, width: half, height },
+    ]
+  }
+  if (size === 3) {
+    const half = width / 2
+    const quarter = height / 2
+    return [
+      { x, y, width: half, height },
+      { x: x + half, y, width: half, height: quarter },
+      { x: x + half, y: y + quarter, width: half, height: quarter },
+    ]
+  }
+  const half = width / 2
+  const middle = height / 2
+  return [
+    { x, y, width: half, height: middle },
+    { x: x + half, y, width: half, height: middle },
+    { x, y: y + middle, width: half, height: middle },
+    { x: x + half, y: y + middle, width: half, height: middle },
+  ]
 }
 
 export function layoutLabel(size: ComboSize, layout: LayoutId): string {
@@ -80,6 +127,7 @@ export function cellRects(size: ComboSize, layout: LayoutId, area: Rect, gap: nu
     return rects
   }
 
+  if (layout === 'filled') return filledCells(size, area)
   if (layout === 'row') return gridCells(size, 1, size)
   if (layout === 'stack') return gridCells(1, size, size)
   if (layout === 'grid') return gridCells(2, 2, size)
@@ -129,8 +177,9 @@ export function composeCombo(images: PreparedImage[], options: ComposeOptions): 
     ctx.fillRect(0, 0, width, height)
   }
 
-  const padding = width * options.padding
-  const gap = width * options.gap
+  const filled = isFilled(options.layout)
+  const padding = filled ? 0 : width * options.padding
+  const gap = filled ? 0 : width * options.gap
   const area: Rect = {
     x: padding,
     y: padding,
@@ -139,19 +188,60 @@ export function composeCombo(images: PreparedImage[], options: ComposeOptions): 
   }
   const cells = cellRects(options.size, options.layout, area, gap)
 
+  if (filled) {
+    // Cover, not contain: scale by the larger ratio so the cell is completely
+    // covered, then centre and let the overflow crop.
+    images.forEach((image, index) => {
+      const cell = cells[index]
+      if (!cell) return
+      const scale = Math.max(cell.width / image.width, cell.height / image.height)
+      const drawWidth = image.width * scale
+      const drawHeight = image.height * scale
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(cell.x, cell.y, cell.width, cell.height)
+      ctx.clip()
+      ctx.drawImage(
+        image.canvas,
+        cell.x + (cell.width - drawWidth) / 2,
+        cell.y + (cell.height - drawHeight) / 2,
+        drawWidth,
+        drawHeight,
+      )
+      ctx.restore()
+    })
+    return canvas
+  }
+
+  /**
+   * Normalised shapes, so "match sizes" compares products and not megapixels.
+   *
+   * Scaling every image by one factor derived from raw pixels means a 2048px
+   * photo and a 700px photo of the same earring are treated as wildly
+   * different sizes: the common factor collapses to the big file's, and the
+   * small one renders at a third of its cell surrounded by empty space. Sizing
+   * each image relative to its own longest edge removes the source resolution
+   * from the comparison, leaving only the shape difference it was meant to fix.
+   */
+  const shapes = images.map((image) => {
+    const longest = Math.max(image.width, image.height) || 1
+    return { width: image.width / longest, height: image.height / longest }
+  })
+
   // Fit scale per cell, then optionally flatten to the smallest so every
   // product is reduced by the same amount and reads at a consistent size.
-  const fitScales = images.map((image, index) => {
+  const fitScales = shapes.map((shape, index) => {
     const cell = cells[index]
-    return Math.min(cell.width / image.width, cell.height / image.height)
+    return Math.min(cell.width / shape.width, cell.height / shape.height)
   })
   const uniform = Math.min(...fitScales)
 
   images.forEach((image, index) => {
     const cell = cells[index]
+    const shape = shapes[index]
     const scale = options.uniformScale ? uniform : fitScales[index]
-    const drawWidth = image.width * scale
-    const drawHeight = image.height * scale
+    const drawWidth = shape.width * scale
+    const drawHeight = shape.height * scale
     const drawX = cell.x + (cell.width - drawWidth) / 2
     const drawY = options.align === 'bottom'
       ? cell.y + cell.height - drawHeight
