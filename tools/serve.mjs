@@ -709,6 +709,63 @@ async function handleCloudinary(request, response, pathname, method) {
       return true
     }
 
+    /**
+     * Direct URLs for the raw product photos — the images in the Add
+     * products panel, before any combo is built from them.
+     *
+     * Independent of Drive and of any combo run: this is just "host these
+     * files, hand back their URLs," useful on its own for pasting a source
+     * photo's link somewhere, or checking one before it goes into a combo.
+     */
+    if (pathname === '/api/cloudinary/products' && method === 'POST') {
+      const credentials = cloudinary.readCredentials(root)
+      if (!credentials) {
+        sendJson(response, 400, { error: 'Connect Cloudinary first — the panel is under Add products.' })
+        return true
+      }
+      const body = await readJson(request)
+      const files = Array.isArray(body.files) ? body.files : []
+      if (!files.length) {
+        sendJson(response, 400, { error: 'No images to upload.' })
+        return true
+      }
+      const folder = `combo-maker/products/${cloudinary.safeFolder(String(body.folder ?? 'uploads')) || 'uploads'}`
+      // Two source photos can share a name (a rename, or two sellers'
+      // "IMG_0001"); a collision here would silently overwrite one image's
+      // URL with the other's, so duplicates get the same numbered suffix the
+      // zip download already uses.
+      const used = new Set()
+      const results = []
+      for (const file of files) {
+        const name = String(file?.name ?? 'image')
+        const dot = name.lastIndexOf('.')
+        const stem = dot > 0 ? name.slice(0, dot) : name
+        // Dedupe on the SANITISED id, not the raw stem: "A & B" and "A-B" are
+        // different names but collapse to the same Cloudinary public_id, and
+        // an unguarded collision there would silently overwrite one photo's
+        // asset with the other's under the URL already handed back for it.
+        let publicId = stem
+        while (used.has(cloudinary.safePublicId(publicId))) {
+          const match = /^(.*) \((\d+)\)$/.exec(publicId)
+          publicId = match ? `${match[1]} (${Number(match[2]) + 1})` : `${stem} (2)`
+        }
+        used.add(cloudinary.safePublicId(publicId))
+        try {
+          const uploaded = await cloudinary.uploadImage(credentials, {
+            data: String(file?.data ?? ''),
+            type: file?.type,
+            folder,
+            publicId,
+          })
+          results.push({ name, url: uploaded.url })
+        } catch (error) {
+          results.push({ name, error: error.message })
+        }
+      }
+      sendJson(response, 200, { results })
+      return true
+    }
+
     if (pathname === '/api/cloudinary/disconnect' && method === 'POST') {
       cloudinary.writeCredentials(root, { cloudName: '', apiKey: '', apiSecret: '' })
       sendJson(response, 200, { configured: false, cloudName: '' })

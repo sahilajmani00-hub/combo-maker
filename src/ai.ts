@@ -339,6 +339,16 @@ export const saveCloudinary = (cloudName: string, apiKey: string, apiSecret: str
 export const disconnectCloudinary = () =>
   request<CloudinaryStatus>('/api/cloudinary/disconnect', postJson({}))
 
+export type HostedProduct = { name: string; url?: string; error?: string }
+
+/**
+ * Direct, durable URLs for the raw product photos in the Add products panel
+ * — independent of Drive and of any combo run, just "host these, hand back
+ * their links."
+ */
+export const uploadProductImages = (folder: string, files: { name: string; type: string; data: string }[]) =>
+  request<{ results: HostedProduct[] }>('/api/cloudinary/products', postJson({ folder, files }))
+
 export const LISTING_SHEET_URL = '/api/drive/sheet.xlsx'
 
 export type Estimate = { credits: number; usd: number }

@@ -64,6 +64,7 @@ import {
   loadTemplate,
   saveCredentials,
   saveTemplate,
+  uploadProductImages,
   appendQueue,
   beginQueue,
   sendWording,
@@ -82,7 +83,7 @@ import {
   type TemplateSummary,
 } from './ai.ts'
 
-type Product = { id: number; file: File; url: string }
+type Product = { id: number; file: File; url: string; hostedUrl?: string }
 type Result = {
   name: string
   blob: Blob
@@ -250,10 +251,13 @@ app.innerHTML = `
         <div class="panel-heading">
           <div><span class="step">01</span><h2>Add products</h2></div>
           <div class="heading-actions">
+            <button id="get-product-urls" class="link-button" disabled>Get image URLs</button>
+            <button id="copy-all-urls" class="link-button hidden">Copy all URLs</button>
             <button id="download-products-zip" class="link-button" disabled>Download all</button>
             <span id="count-label" class="count-label">0 images</span>
           </div>
         </div>
+        <p id="product-urls-status" class="hint hidden"></p>
         <label class="dropzone" id="dropzone" for="file-input">
           <input id="file-input" type="file" accept="image/*" multiple>
           <span class="upload-icon">+</span><strong>Drop product images here</strong><span>or <u>browse your files</u></span>
@@ -675,6 +679,11 @@ function renameProduct(id: number, stem: string) {
 function renderProducts() {
   el('#count-label').textContent = plural(state.products.length, 'image')
   el<HTMLButtonElement>('#download-products-zip').disabled = state.products.length === 0
+  const urlsButton = el<HTMLButtonElement>('#get-product-urls')
+  const hosting = Boolean(ai.cloudinary?.configured)
+  urlsButton.disabled = state.products.length === 0 || !hosting
+  urlsButton.title = hosting ? '' : 'Connect Cloudinary in this panel first.'
+  el('#copy-all-urls').classList.toggle('hidden', !state.products.some((product) => product.hostedUrl))
   // Rewriting the list while a name is being typed would steal the caret.
   if (productList.contains(document.activeElement)) return
   const perSet = state.comboSize
@@ -693,6 +702,9 @@ function renderProducts() {
             <input class="product-name" type="text" data-rename="${product.id}" value="${escapeHtml(nameStem(product.file.name))}" spellcheck="false" aria-label="Name for product ${index + 1}">
             <span class="product-set">${badge}</span>
             <span class="row-actions">
+              ${product.hostedUrl
+                ? `<button class="icon-button" data-copy-url="${product.id}" title="Copy image URL" aria-label="Copy image URL for ${escapeHtml(product.file.name)}">&#128279;</button>`
+                : ''}
               <a class="icon-button" href="${product.url}" download="${escapeHtml(product.file.name)}" title="Download" aria-label="Download ${escapeHtml(product.file.name)}">&dArr;</a>
               <button class="icon-button" data-move="up" data-id="${product.id}" ${index === 0 ? 'disabled' : ''} aria-label="Move up">&uarr;</button>
               <button class="icon-button" data-move="down" data-id="${product.id}" ${index === state.products.length - 1 ? 'disabled' : ''} aria-label="Move down">&darr;</button>
@@ -929,7 +941,12 @@ productList.addEventListener('click', (event) => {
   const remove = target.closest<HTMLButtonElement>('[data-remove]')
   if (remove) return dropProduct(Number(remove.dataset.remove))
   const move = target.closest<HTMLButtonElement>('[data-move]')
-  if (move) moveProduct(Number(move.dataset.id), move.dataset.move as 'up' | 'down')
+  if (move) return moveProduct(Number(move.dataset.id), move.dataset.move as 'up' | 'down')
+  const copy = target.closest<HTMLButtonElement>('[data-copy-url]')
+  if (copy) {
+    const product = state.products.find((item) => item.id === Number(copy.dataset.copyUrl))
+    if (product?.hostedUrl) void copyText(product.hostedUrl, 'Image URL copied.')
+  }
 })
 
 dropzone.addEventListener('dragover', (event) => {
@@ -1181,6 +1198,85 @@ async function generate() {
 }
 
 generateButton.addEventListener('click', generate)
+
+/**
+ * A status line dedicated to this action, inside the Add products panel.
+ *
+ * The panel is shared between both tabs, so this is visible regardless of
+ * which one the person is on — say() alone would risk writing into the AI
+ * tab's hint line while the person is looking at Canvas, or the reverse.
+ */
+function sayProductUrls(text: string, error = false) {
+  const line = el('#product-urls-status')
+  line.classList.remove('hidden')
+  line.className = error ? 'hint error' : 'hint'
+  line.textContent = text
+}
+
+async function copyText(text: string, confirmMessage: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    sayProductUrls(confirmMessage)
+  } catch {
+    // A blocked clipboard (an insecure context, a denied permission) should
+    // not leave the person with nothing — the value is still shown for a
+    // manual copy instead of just failing silently.
+    sayProductUrls(`Could not copy automatically — here it is: ${text}`, true)
+  }
+}
+
+el('#get-product-urls').addEventListener('click', async () => {
+  if (!state.products.length) return
+  if (!ai.cloudinary?.configured) {
+    sayProductUrls('Connect Cloudinary first — the panel is right below this one.', true)
+    return
+  }
+  const button = el<HTMLButtonElement>('#get-product-urls')
+  button.disabled = true
+  button.textContent = 'Uploading...'
+  // Snapshotted so a product added or removed mid-upload cannot be matched to
+  // the wrong result when the response comes back.
+  const batch = state.products.map((product) => ({ id: product.id, file: product.file }))
+  const folder = `Product photos ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
+  sayProductUrls(`Uploading ${plural(batch.length, 'image')} to Cloudinary...`)
+  try {
+    const { results } = await uploadProductImages(
+      folder,
+      await Promise.all(batch.map(async ({ file }) => ({ name: file.name, type: file.type, data: await fileToBase64(file) }))),
+    )
+    let done = 0
+    let failed = 0
+    results.forEach((result, index) => {
+      const id = batch[index]?.id
+      const product = state.products.find((item) => item.id === id)
+      if (!product) return
+      if (result.url) {
+        product.hostedUrl = result.url
+        done += 1
+      } else {
+        failed += 1
+      }
+    })
+    renderProducts()
+    sayProductUrls(
+      failed
+        ? `${done} of ${results.length} uploaded — ${failed} failed. Click the link icon on a row to copy its URL.`
+        : `${done} image${done === 1 ? '' : 's'} uploaded. Click the link icon on a row, or "Copy all URLs", to grab the links.`,
+      Boolean(failed && !done),
+    )
+  } catch (error) {
+    sayProductUrls(error instanceof Error ? error.message : 'Could not upload those images.', true)
+  } finally {
+    button.disabled = state.products.length === 0 || !ai.cloudinary?.configured
+    button.textContent = 'Get image URLs'
+  }
+})
+
+el('#copy-all-urls').addEventListener('click', async () => {
+  const urls = state.products.map((product) => product.hostedUrl).filter((url): url is string => Boolean(url))
+  if (!urls.length) return
+  await copyText(urls.join('\n'), `Copied ${plural(urls.length, 'URL')}.`)
+})
 
 el('#download-products-zip').addEventListener('click', async () => {
   if (!state.products.length) return
@@ -1840,8 +1936,10 @@ async function refreshCloudinary() {
     ai.cloudinary = null
   }
   renderCloudinary()
-  // The upload button names its destination, which depends on this.
+  // The upload button names its destination, and the "Get image URLs" button
+  // is gated on this — both depend on it.
   renderDrive()
+  renderProducts()
 }
 
 function renderCloudinary() {
@@ -1897,6 +1995,7 @@ el('#cloudinary-save').addEventListener('click', async () => {
     ai.cloudinary = status
     renderCloudinary()
     renderDrive()
+    renderProducts()
     const message = `Cloudinary connected to "${status.cloudName}" and saved — a test image uploaded successfully. You will not need to enter this again.`
     sayCloudinary(message)
     say(message)
@@ -1916,6 +2015,8 @@ el('#cloudinary-disconnect').addEventListener('click', async () => {
     ai.cloudinary = null
   }
   renderCloudinary()
+  renderDrive()
+  renderProducts()
   say('Cloudinary disconnected — sheets will fall back to Drive URLs.')
 })
 
