@@ -1,15 +1,20 @@
 import './style.css'
 import { prepareImage, type PreparedImage } from './imageprep.ts'
 import {
+  DEFAULT_FRAMING,
   LAYOUTS,
   RATIOS,
   canvasToBlob,
   composeCombo,
   isFilled,
+  isFramed,
   layoutLabel,
   normalizeLayout,
   type AlignId,
   type ComboSize,
+  type ComposeImage,
+  type ComposeOptions,
+  type Framing,
   type LayoutId,
   type RatioId,
 } from './compose.ts'
@@ -83,7 +88,7 @@ import {
   type TemplateSummary,
 } from './ai.ts'
 
-type Product = { id: number; file: File; url: string; hostedUrl?: string }
+type Product = { id: number; file: File; url: string; hostedUrl?: string; framing: Framing }
 type Result = {
   name: string
   blob: Blob
@@ -174,6 +179,8 @@ const ai = {
 }
 
 let tab: Tab = 'canvas'
+/** Product id whose framing panel is open, if any. */
+let framingOpen: number | null = null
 let results: Result[] = []
 let nextId = 1
 let busy = false
@@ -690,8 +697,10 @@ function renderProducts() {
   urlsButton.disabled = state.products.length === 0 || !hosting
   urlsButton.title = hosting ? '' : 'Connect Cloudinary in this panel first.'
   el('#copy-all-urls').classList.toggle('hidden', !state.products.some((product) => product.hostedUrl))
-  // Rewriting the list while a name is being typed would steal the caret.
-  if (productList.contains(document.activeElement)) return
+  // Rewriting the list while a name is being typed would steal the caret. Only
+  // that one field is protected: every other control in the list expects the
+  // rows to redraw underneath it.
+  if ((document.activeElement as HTMLElement | null)?.dataset.rename) return
   const perSet = state.comboSize
   productList.innerHTML = state.products.length
     ? state.products
@@ -702,6 +711,7 @@ function renderProducts() {
           const badge = state.mode === 'sequential'
             ? (inFullSet ? `Set ${String(setIndex + 1).padStart(2, '0')}` : 'Spare')
             : ''
+          const open = framingOpen === product.id
           return `<div class="product-row">
             <img src="${product.url}" alt="Product ${index + 1}">
             <span class="product-number">${String(index + 1).padStart(2, '0')}</span>
@@ -711,15 +721,71 @@ function renderProducts() {
               ${product.hostedUrl
                 ? `<button class="icon-button" data-copy-url="${product.id}" title="Copy image URL" aria-label="Copy image URL for ${escapeHtml(product.file.name)}">&#128279;</button>`
                 : ''}
+              <button class="icon-button framing-button${isFramed(product.framing) ? ' framed' : ''}${open ? ' open' : ''}" data-framing="${product.id}" aria-expanded="${open}" title="Adjust how this photo sits in every combo" aria-label="Adjust framing for ${escapeHtml(product.file.name)}">&#10530;</button>
               <a class="icon-button" href="${product.url}" download="${escapeHtml(product.file.name)}" title="Download" aria-label="Download ${escapeHtml(product.file.name)}">&dArr;</a>
               <button class="icon-button" data-move="up" data-id="${product.id}" ${index === 0 ? 'disabled' : ''} aria-label="Move up">&uarr;</button>
               <button class="icon-button" data-move="down" data-id="${product.id}" ${index === state.products.length - 1 ? 'disabled' : ''} aria-label="Move down">&darr;</button>
               <button class="icon-button remove-button" data-remove="${product.id}" aria-label="Remove ${escapeHtml(product.file.name)}">&times;</button>
             </span>
-          </div>`
+          </div>${open ? framingPanel(product) : ''}`
         })
         .join('')
     : '<div class="empty-state">Your selected products will appear here.</div>'
+
+  if (framingOpen === null) return
+  const product = state.products.find((item) => item.id === framingOpen)
+  if (product) void renderFramingPreview(product)
+  else framingOpen = null
+}
+
+/** `per` is what one slider step is worth, so degrees stay degrees. */
+const FRAMING_SLIDERS = [
+  { key: 'zoom', label: 'Zoom', min: 50, max: 250, per: 100, unit: '%' },
+  { key: 'rotate', label: 'Rotate', min: -180, max: 180, per: 1, unit: '°' },
+  { key: 'x', label: 'Left / right', min: -100, max: 100, per: 100, unit: '%' },
+  { key: 'y', label: 'Up / down', min: -100, max: 100, per: 100, unit: '%' },
+] as const
+
+function framingPanel(product: Product): string {
+  const sliders = FRAMING_SLIDERS.map((slider) => {
+    const value = Math.round(product.framing[slider.key] * slider.per)
+    return `<label class="framing-slider">
+      <span class="framing-label">${slider.label}</span>
+      <input type="range" min="${slider.min}" max="${slider.max}" step="1" value="${value}" data-framing-input="${slider.key}" data-id="${product.id}">
+      <span class="slider-value" data-framing-value="${slider.key}">${value}${slider.unit}</span>
+    </label>`
+  }).join('')
+  return `<div class="framing-panel">
+    <div class="framing-preview" data-framing-preview="${product.id}"></div>
+    <div class="framing-controls">
+      ${sliders}
+      <div class="framing-foot">
+        <p class="mode-copy">Every combo using this photo gets the same framing. Generate again to rebuild them.</p>
+        <button class="chip" data-framing-reset="${product.id}">Reset</button>
+      </div>
+    </div>
+  </div>`
+}
+
+/**
+ * The first combo this photo lands in, composed exactly as the real run would.
+ *
+ * Framing is a property of the photo rather than of one combo, so showing it
+ * inside a genuine combo is the only preview that answers the question being
+ * asked — what this change does to all of them.
+ */
+let framingPreviewToken = 0
+async function renderFramingPreview(product: Product) {
+  const token = ++framingPreviewToken
+  const box = productList.querySelector<HTMLDivElement>(`[data-framing-preview="${product.id}"]`)
+  if (!box) return
+  const group = comboGroups().find((items) => items.some((item) => item.id === product.id)) ?? [product]
+  const canvas = composeCombo(await framedImages(group), canvasOptions())
+  // Decoding is async, so the panel may have closed or been overtaken by a
+  // later drag by the time the photos are ready.
+  if (token !== framingPreviewToken || !box.isConnected) return
+  canvas.className = 'framing-canvas'
+  box.replaceChildren(canvas)
 }
 
 function renderResults() {
@@ -746,6 +812,9 @@ function renderResults() {
 function currentSettings(): Record<string, unknown> {
   return {
     canvas: { ...state, products: undefined },
+    // Framing belongs to the photo, and ids are reassigned on load, so it
+    // travels by position just like the captions below.
+    framing: state.products.map((product) => product.framing),
     ai: {
       angles: ai.angles,
       subject: ai.subject,
@@ -794,8 +863,10 @@ function applySettings(settings: Record<string, unknown>) {
   ai.perCombo = Boolean(saved.perCombo)
   ai.writtenPrompts = (saved.writtenPrompts as Record<string, string>) ?? {}
   ai.captions = {}
+  const framing = Array.isArray(settings.framing) ? (settings.framing as Partial<Framing>[]) : []
   state.products.forEach((product, index) => {
     if (captions[index]) ai.captions[product.id] = captions[index]
+    product.framing = { ...DEFAULT_FRAMING, ...framing[index] }
   })
 
   // The controls read their values from state on render, except the free-text
@@ -857,7 +928,7 @@ function addFiles(files: FileList | File[]) {
   const accepted = incoming.slice(0, Math.max(0, room))
   state.products = [
     ...state.products,
-    ...accepted.map((file) => ({ id: nextId++, file, url: URL.createObjectURL(file) })),
+    ...accepted.map((file) => ({ id: nextId++, file, url: URL.createObjectURL(file), framing: { ...DEFAULT_FRAMING } })),
   ]
   refresh()
   if (incoming.length > accepted.length) {
@@ -936,10 +1007,23 @@ fileInput.addEventListener('change', () => {
 
 productList.addEventListener('input', (event) => {
   const input = event.target as HTMLInputElement
-  if (!input.dataset.rename) return
-  renameProduct(Number(input.dataset.rename), input.value)
-  renderControls()
-  renderAiControls()
+  if (input.dataset.rename) {
+    renameProduct(Number(input.dataset.rename), input.value)
+    renderControls()
+    renderAiControls()
+    return
+  }
+  const slider = FRAMING_SLIDERS.find((entry) => entry.key === input.dataset.framingInput)
+  if (!slider) return
+  const product = state.products.find((item) => item.id === Number(input.dataset.id))
+  if (!product) return
+  product.framing = { ...product.framing, [slider.key]: Number(input.value) / slider.per }
+  // Redrawing the whole list mid-drag would tear the slider out from under the
+  // pointer, so the pieces that changed are updated in place.
+  const readout = input.parentElement?.querySelector(`[data-framing-value="${slider.key}"]`)
+  if (readout) readout.textContent = `${input.value}${slider.unit}`
+  productList.querySelector(`[data-framing="${product.id}"]`)?.classList.toggle('framed', isFramed(product.framing))
+  void renderFramingPreview(product)
 })
 
 productList.addEventListener('click', (event) => {
@@ -952,6 +1036,26 @@ productList.addEventListener('click', (event) => {
   if (copy) {
     const product = state.products.find((item) => item.id === Number(copy.dataset.copyUrl))
     if (product?.hostedUrl) void copyText(product.hostedUrl, 'Image URL copied.')
+    return
+  }
+  const adjust = target.closest<HTMLButtonElement>('[data-framing]')
+  if (adjust) {
+    const id = Number(adjust.dataset.framing)
+    framingOpen = framingOpen === id ? null : id
+    renderProducts()
+    if (framingOpen !== null) {
+      productList.querySelector(`[data-framing-preview="${framingOpen}"]`)
+        ?.closest('.framing-panel')
+        ?.scrollIntoView({ block: 'nearest' })
+    }
+    return
+  }
+  const reset = target.closest<HTMLButtonElement>('[data-framing-reset]')
+  if (reset) {
+    const product = state.products.find((item) => item.id === Number(reset.dataset.framingReset))
+    if (!product) return
+    product.framing = { ...DEFAULT_FRAMING }
+    renderProducts()
   }
 })
 
@@ -1039,7 +1143,7 @@ el('#template-list').addEventListener('click', async (event) => {
     state.products = template.products.map((product) => {
       const bytes = Uint8Array.from(atob(product.data), (char) => char.charCodeAt(0))
       const file = new File([bytes], product.name, { type: product.type })
-      return { id: nextId++, file, url: URL.createObjectURL(file) }
+      return { id: nextId++, file, url: URL.createObjectURL(file), framing: { ...DEFAULT_FRAMING } }
     })
     applySettings(template.settings)
     el<HTMLInputElement>('#template-name').value = template.name
@@ -1112,6 +1216,26 @@ async function preparedFor(product: Product, forceTrim?: boolean): Promise<Prepa
   return prepared
 }
 
+/** The Canvas tab's settings as one compose call, shared with the framing preview. */
+function canvasOptions(): ComposeOptions {
+  return {
+    size: state.comboSize,
+    layout: state.layout,
+    ratio: state.ratio,
+    // JPEG has no alpha channel, so a transparent request has to land on white.
+    background: state.format === 'jpeg' && state.background === 'transparent' ? '#ffffff' : state.background,
+    padding: state.padding / 100,
+    gap: state.gap / 100,
+    uniformScale: state.uniformScale,
+    align: state.align,
+  }
+}
+
+/** Each photo in a combo, carrying the framing it keeps across every combo. */
+function framedImages(group: Product[]): Promise<ComposeImage[]> {
+  return Promise.all(group.map(async (product) => ({ ...(await preparedFor(product)), framing: product.framing })))
+}
+
 /**
  * Flattens one combo onto a canvas, for models that take a single reference.
  *
@@ -1155,8 +1279,6 @@ async function generate() {
   generateButton.disabled = true
   clearResults()
 
-  // JPEG has no alpha channel, so a transparent request has to land on white.
-  const background = state.format === 'jpeg' && state.background === 'transparent' ? '#ffffff' : state.background
   const extension = state.format === 'png' ? 'png' : 'jpg'
   const mime = state.format === 'png' ? 'image/png' : 'image/jpeg'
   const usedNames = new Set<string>()
@@ -1169,17 +1291,7 @@ async function generate() {
       // Yield so the label above actually paints between sets.
       await new Promise((resolve) => setTimeout(resolve, 0))
 
-      const images = await Promise.all(group.map((product) => preparedFor(product)))
-      const canvas = composeCombo(images, {
-        size: state.comboSize,
-        layout: state.layout,
-        ratio: state.ratio,
-        background,
-        padding: state.padding / 100,
-        gap: state.gap / 100,
-        uniformScale: state.uniformScale,
-        align: state.align,
-      })
+      const canvas = composeCombo(await framedImages(group), canvasOptions())
       const blob = await canvasToBlob(canvas, mime, state.format === 'jpeg' ? 0.92 : undefined)
       results.push({
         name: comboName(group.map((product) => product.file.name), extension, usedNames),

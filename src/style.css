@@ -84,6 +84,19 @@ input.product-name:focus { border-color: var(--orange); background: #fff; color:
 .icon-button:hover:not(:disabled) { border-color: var(--line); color: var(--ink); background: #fff; }
 .icon-button:disabled { opacity: .25; cursor: not-allowed; }
 .icon-button.remove-button { font-size: 20px; }
+.framing-button.framed { color: var(--orange); }
+.framing-button.open { border-color: var(--line); background: #fff; color: var(--ink); }
+
+.framing-panel { display: flex; gap: 16px; align-items: start; background: #fff; border: 1px solid var(--line); padding: 14px; }
+.framing-preview { width: 148px; flex: none; background: #e9e7df; display: grid; place-items: center; min-height: 92px; }
+.framing-canvas { display: block; max-width: 100%; height: auto; }
+.framing-controls { flex: 1; min-width: 0; display: grid; gap: 8px; }
+.framing-slider { display: flex; align-items: center; gap: 10px; font: 11px Arial, sans-serif; color: var(--muted); }
+.framing-slider input[type="range"] { flex: 1; min-width: 0; accent-color: var(--orange); }
+.framing-label { flex: none; width: 66px; }
+.framing-foot { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.framing-foot .mode-copy { margin: 0; }
+@media (max-width: 520px) { .framing-panel { flex-direction: column; } .framing-preview { width: 100%; } }
 
 /* ---------- recipe controls ---------- */
 .section-copy { color: var(--muted); font: 13px/1.5 Arial, sans-serif; margin: 4px 0 20px; }

@@ -9,6 +9,61 @@ export type AlignId = 'center' | 'bottom'
 
 export type Rect = { x: number; y: number; width: number; height: number }
 
+/**
+ * How one product photo sits inside its cell, on top of the shared layout.
+ *
+ * A photo keeps the same framing in every combo it appears in, so a model shot
+ * that lands badly cropped is corrected once rather than per combo.
+ *
+ * `zoom` multiplies whatever scale the layout already chose and `rotate` turns
+ * the photo in degrees. `x` and `y` run from -1 to 1 as a fraction of the slack
+ * — the gap between the photo's footprint and its cell, whichever is larger —
+ * so the ends of the sliders are always the furthest the photo can move and
+ * still have something to show.
+ */
+export type Framing = { zoom: number; rotate: number; x: number; y: number }
+
+export const DEFAULT_FRAMING: Framing = { zoom: 1, rotate: 0, x: 0, y: 0 }
+
+export const isFramed = (framing: Framing) =>
+  framing.zoom !== 1 || framing.rotate !== 0 || framing.x !== 0 || framing.y !== 0
+
+export type ComposeImage = PreparedImage & { framing?: Framing }
+
+/**
+ * A turned photo is measured by the upright box it sweeps out, not by its own
+ * edges, so every fit and every limit below is written in terms of `cos`/`sin`.
+ * At zero degrees they are 1 and 0, which collapses each formula back to the
+ * plain one it generalises.
+ */
+function turn(framing: Framing) {
+  const radians = framing.rotate * Math.PI / 180
+  return { radians, cos: Math.abs(Math.cos(radians)), sin: Math.abs(Math.sin(radians)) }
+}
+
+const spread = (width: number, height: number, cos: number, sin: number) => width * cos + height * sin
+
+/** Largest the photo can be drawn with its turned footprint still inside the cell. */
+function containScale(shape: { width: number; height: number }, cell: Rect, cos: number, sin: number) {
+  return Math.min(
+    cell.width / spread(shape.width, shape.height, cos, sin),
+    cell.height / spread(shape.height, shape.width, cos, sin),
+  )
+}
+
+/** Smallest the photo can be drawn while still covering every corner of the cell. */
+function coverScale(image: { width: number; height: number }, cell: Rect, cos: number, sin: number) {
+  return Math.max(
+    spread(cell.width, cell.height, cos, sin) / image.width,
+    spread(cell.height, cell.width, cos, sin) / image.height,
+  )
+}
+
+/** The cell's centre, slid by the share of the slack the framing asks for. */
+function centre(start: number, cellSize: number, footprint: number, offset: number) {
+  return start + cellSize / 2 + offset * Math.abs(cellSize - footprint) / 2
+}
+
 export type ComposeOptions = {
   size: ComboSize
   layout: LayoutId
@@ -161,7 +216,7 @@ export function cellRects(size: ComboSize, layout: LayoutId, area: Rect, gap: nu
   return rects
 }
 
-export function composeCombo(images: PreparedImage[], options: ComposeOptions): HTMLCanvasElement {
+export function composeCombo(images: ComposeImage[], options: ComposeOptions): HTMLCanvasElement {
   const { width, height } = RATIOS[options.ratio]
   const canvas = document.createElement('canvas')
   canvas.width = width
@@ -194,20 +249,21 @@ export function composeCombo(images: PreparedImage[], options: ComposeOptions): 
     images.forEach((image, index) => {
       const cell = cells[index]
       if (!cell) return
-      const scale = Math.max(cell.width / image.width, cell.height / image.height)
+      const framing = image.framing ?? DEFAULT_FRAMING
+      const { radians, cos, sin } = turn(framing)
+      const scale = coverScale(image, cell, cos, sin) * framing.zoom
       const drawWidth = image.width * scale
       const drawHeight = image.height * scale
       ctx.save()
       ctx.beginPath()
       ctx.rect(cell.x, cell.y, cell.width, cell.height)
       ctx.clip()
-      ctx.drawImage(
-        image.canvas,
-        cell.x + (cell.width - drawWidth) / 2,
-        cell.y + (cell.height - drawHeight) / 2,
-        drawWidth,
-        drawHeight,
+      ctx.translate(
+        centre(cell.x, cell.width, spread(drawWidth, drawHeight, cos, sin), framing.x),
+        centre(cell.y, cell.height, spread(drawHeight, drawWidth, cos, sin), framing.y),
       )
+      ctx.rotate(radians)
+      ctx.drawImage(image.canvas, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
       ctx.restore()
     })
     return canvas
@@ -230,23 +286,37 @@ export function composeCombo(images: PreparedImage[], options: ComposeOptions): 
 
   // Fit scale per cell, then optionally flatten to the smallest so every
   // product is reduced by the same amount and reads at a consistent size.
-  const fitScales = shapes.map((shape, index) => {
-    const cell = cells[index]
-    return Math.min(cell.width / shape.width, cell.height / shape.height)
-  })
+  // Measured upright, so turning one product cannot resize all the others.
+  const fitScales = shapes.map((shape, index) => containScale(shape, cells[index], 1, 0))
   const uniform = Math.min(...fitScales)
 
   images.forEach((image, index) => {
     const cell = cells[index]
     const shape = shapes[index]
-    const scale = options.uniformScale ? uniform : fitScales[index]
-    const drawWidth = shape.width * scale
-    const drawHeight = shape.height * scale
-    const drawX = cell.x + (cell.width - drawWidth) / 2
-    const drawY = options.align === 'bottom'
-      ? cell.y + cell.height - drawHeight
-      : cell.y + (cell.height - drawHeight) / 2
-    ctx.drawImage(image.canvas, drawX, drawY, drawWidth, drawHeight)
+    const framing = image.framing ?? DEFAULT_FRAMING
+    const { radians, cos, sin } = turn(framing)
+    // Turning a product widens its footprint, so it gives up whatever size it
+    // needs to stay inside its own cell rather than spilling into its neighbour.
+    const fit = Math.min(options.uniformScale ? uniform : fitScales[index], containScale(shape, cell, cos, sin))
+    const drawWidth = shape.width * fit * framing.zoom
+    const drawHeight = shape.height * fit * framing.zoom
+    const footprintX = spread(drawWidth, drawHeight, cos, sin)
+    const footprintY = spread(drawHeight, drawWidth, cos, sin)
+    // A bottom-aligned product already sits on the baseline, so its vertical
+    // slider only has room to lift it off.
+    const centreY = options.align === 'bottom'
+      ? cell.y + cell.height - footprintY / 2 + framing.y * Math.abs(cell.height - footprintY) / 2
+      : centre(cell.y, cell.height, footprintY, framing.y)
+    // Zooming past the fit scale is the only way a product can outgrow its
+    // cell, and it must crop rather than crawl into the gap beside it.
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(cell.x, cell.y, cell.width, cell.height)
+    ctx.clip()
+    ctx.translate(centre(cell.x, cell.width, footprintX, framing.x), centreY)
+    ctx.rotate(radians)
+    ctx.drawImage(image.canvas, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
+    ctx.restore()
   })
 
   return canvas
