@@ -9,6 +9,16 @@ images. It has two sections:
   gets each combo back *re-photographed* from several camera angles, saved straight into
   folders on disk. This one does upload your photos, and it spends Higgsfield credits.
 
+## Invite-only hosted dashboard
+
+The managed Sites deployment uses invite-only sharing and sign-in through ChatGPT.
+There is no public signup. Address: https://sahil-combo-maker.sahilajmani00.chatgpt.site
+See [hosting and invitations](HOSTING.md) for access management and self-hosted alternatives.
+
+The hosted version supports browser-based photo composition and downloads. Photos stay
+in each user's browser. The existing AI, Drive, Cloudinary, and disk-template integrations
+remain local-only because they currently share the owner's credentials and filesystem.
+
 ## Run it
 
 **Double-click `Combo Maker.bat`.** That's the whole thing — it builds the app if needed,

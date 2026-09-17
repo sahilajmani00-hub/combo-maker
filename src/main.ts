@@ -1,16 +1,24 @@
 import './style.css'
 import { prepareImage, type PreparedImage } from './imageprep.ts'
 import {
+  DEFAULT_FRAMING,
   LAYOUTS,
   RATIOS,
   canvasToBlob,
+  comboCells,
   composeCombo,
+  isFilled,
+  isFramed,
   layoutLabel,
   normalizeLayout,
   type AlignId,
   type ComboSize,
+  type ComposeImage,
+  type ComposeOptions,
+  type Framing,
   type LayoutId,
   type RatioId,
+  type Rect,
 } from './compose.ts'
 import { createZip, type ZipEntry } from './zip.ts'
 import { comboFolder, comboName } from './naming.ts'
@@ -42,12 +50,28 @@ import {
   fetchConfig,
   fetchRun,
   revealFolder,
+  cancelDriveUpload,
+  disconnectDrive,
+  cloudinaryStatus,
+  disconnectCloudinary,
+  driveStatus,
+  saveCloudinary,
+  reconnectDrive,
+  saveDriveClient,
+  scanDriveFolder,
+  startDriveUpload,
+  startDriveImages,
+  sendDriveImages,
+  finishDriveImages,
+  LISTING_SHEET_URL,
+  type DriveGroup,
   deleteTemplate,
   fileToBase64,
   listTemplates,
   loadTemplate,
   saveCredentials,
   saveTemplate,
+  uploadProductImages,
   appendQueue,
   beginQueue,
   sendWording,
@@ -56,6 +80,8 @@ import {
   startRun,
   toReference,
   type AiConfig,
+  type CloudinaryStatus,
+  type DriveStatus,
   type Estimate,
   type QueueSummary,
   type RunRequest,
@@ -64,11 +90,37 @@ import {
   type TemplateSummary,
 } from './ai.ts'
 
-type Product = { id: number; file: File; url: string }
-type Result = { name: string; blob: Blob; url: string; index: number }
+/** `framing` is indexed by the area the photo lands in — see `framingSlots`. */
+type Product = { id: number; file: File; url: string; hostedUrl?: string; framing: Framing[] }
+type Result = {
+  name: string
+  blob: Blob
+  url: string
+  index: number
+  /** The product photos this combo was composed from, in frame order. */
+  sources: File[]
+}
 type Tab = 'canvas' | 'ai'
 
+const MANAGED_ACCESS = import.meta.env.VITE_MANAGED_ACCESS === 'true'
+const INVITE_PORTAL = import.meta.env.VITE_INVITE_PORTAL === 'true'
+const STATIC_HOST = import.meta.env.VITE_STATIC_HOST === 'true'
+if (STATIC_HOST) document.documentElement.classList.add('static-host')
+
 const MAX_PRODUCTS = 60
+
+/** The largest combo, and so the number of areas a photo can be framed for. */
+const MAX_AREAS = 4
+
+/**
+ * One framing per area, since a photo is cropped by the shape of the cell it
+ * lands in and that changes from slot to slot.
+ */
+const framingSlots = (saved?: unknown): Framing[] =>
+  Array.from({ length: MAX_AREAS }, (_, area) => ({
+    ...DEFAULT_FRAMING,
+    ...(Array.isArray(saved) ? (saved[area] as Partial<Framing> | undefined) : undefined),
+  }))
 
 const BACKGROUNDS = [
   { id: '#ffffff', label: 'White' },
@@ -84,7 +136,7 @@ const state = {
   products: [] as Product[],
   comboSize: 2 as ComboSize,
   mode: 'combinations' as GroupMode,
-  layout: 'row' as LayoutId,
+  layout: 'filled' as LayoutId,
   ratio: 'square' as RatioId,
   background: '#ffffff',
   padding: 6,
@@ -124,6 +176,12 @@ const ai = {
   reverseModel: '',
   reversing: false,
   reversed: [] as { file: string; prompt: string; error: string | null }[],
+  drive: null as DriveStatus | null,
+  cloudinary: null as CloudinaryStatus | null,
+  driveFolder: '',
+  driveBusy: false,
+  driveFlipkart: true,
+  canvasLayout: 'combo+sources' as 'combo' | 'combo+sources' | 'flat',
   queueing: false,
   queue: null as QueueSummary | null,
   templates: [] as TemplateSummary[],
@@ -137,6 +195,9 @@ const ai = {
 }
 
 let tab: Tab = 'canvas'
+/** Product id whose framing panel is open, if any, and the area it is editing. */
+let framingOpen: number | null = null
+let framingArea = 0
 let results: Result[] = []
 let nextId = 1
 let busy = false
@@ -197,7 +258,7 @@ const modeOptionsHtml = () =>
 app.innerHTML = `
   <header class="topbar">
     <a class="brand" href="."><span class="brand-mark">CM</span><span>Combo Maker</span></a>
-    <span class="local-pill"><span class="status-dot"></span>Runs locally</span>
+    <div class="account-actions">${INVITE_PORTAL ? '<form method="post" action="/auth/logout"><button class="link-button" type="submit">Sign out</button></form>' : ''}<span class="local-pill"><span class="status-dot"></span>${MANAGED_ACCESS ? 'Invite-only access' : STATIC_HOST ? 'Runs in your browser' : 'Runs locally'}</span></div>
   </header>
   <main>
     <section class="intro">
@@ -209,6 +270,7 @@ app.innerHTML = `
       <div class="intro-note"><span>01</span><p>Your files stay in this browser.<br>No upload, no account, no fuss.</p></div>
     </section>
 
+    ${STATIC_HOST ? '<p class="hosting-note">Create and download combos on your phone, tablet, or computer. Photos stay in this browser and are not saved after you close or refresh the page. AI, saved templates, Google Drive, and image hosting require the local app. <a href="https://github.com/sahilajmani00-hub/combo-maker#run-it">Local app setup</a> · <a href="./privacy.html">Privacy policy</a></p>' : ''}
     <div class="mode-switch" role="tablist" aria-label="Combo builder">
       <button class="mode-tab selected" data-tab="canvas" role="tab" aria-selected="true"><b>Canvas combos</b><span>Arrange the real photos side by side. Offline and free.</span></button>
       <button class="mode-tab" data-tab="ai" role="tab" aria-selected="false"><b>AI angle combos</b><span>Higgsfield re-shoots each set from several camera angles.</span></button>
@@ -218,8 +280,14 @@ app.innerHTML = `
       <section class="panel setup-panel">
         <div class="panel-heading">
           <div><span class="step">01</span><h2>Add products</h2></div>
-          <span id="count-label" class="count-label">0 images</span>
+          <div class="heading-actions">
+            <button id="get-product-urls" class="link-button" disabled>Get image URLs</button>
+            <button id="copy-all-urls" class="link-button hidden">Copy all URLs</button>
+            <button id="download-products-zip" class="link-button" disabled>Download all</button>
+            <span id="count-label" class="count-label">0 images</span>
+          </div>
         </div>
+        <p id="product-urls-status" class="hint hidden"></p>
         <label class="dropzone" id="dropzone" for="file-input">
           <input id="file-input" type="file" accept="image/*" multiple>
           <span class="upload-icon">+</span><strong>Drop product images here</strong><span>or <u>browse your files</u></span>
@@ -227,8 +295,8 @@ app.innerHTML = `
         </label>
         <div id="product-list" class="product-list"></div>
 
-        <div class="rule"></div>
-        <div class="field">
+        <div class="rule server-feature"></div>
+        <div class="field server-feature">
           <span class="field-label">Templates</span>
           <div class="template-row">
             <input id="template-name" class="text-input" type="text" placeholder="Name this setup" spellcheck="false">
@@ -236,6 +304,48 @@ app.innerHTML = `
           </div>
           <div id="template-list" class="template-list"></div>
           <p class="mode-copy">Saves your photos and every setting to disk, so a refresh — or a new browser — picks up exactly where you left off. Saving over a name replaces it.</p>
+        </div>
+
+        <div class="rule server-feature"></div>
+        <div class="field server-feature">
+          <span class="field-label">Google Drive</span>
+          <div id="drive-connect" class="connect-box">
+            <div id="drive-reconnect-row" class="hidden">
+              <button id="drive-reconnect" class="ghost-button">Reconnect Google Drive</button>
+              <p class="mode-copy">Your OAuth client is still saved — this just asks Google for access again.</p>
+            </div>
+            <div class="connect-fields">
+              <input id="drive-client-id" type="text" placeholder="OAuth client ID" autocomplete="off" spellcheck="false">
+              <input id="drive-client-secret" type="password" placeholder="Client secret" autocomplete="off">
+            </div>
+            <button id="drive-save" class="ghost-button">Connect Google Drive</button>
+            <p class="mode-copy">Create a <b>Desktop app</b> OAuth client at <b>console.cloud.google.com</b> with the Drive API enabled, and paste its ID and secret. Access is limited to files this app creates — it cannot see the rest of your Drive. Works from either tab once connected.</p>
+          </div>
+          <div id="drive-connected-row" class="hidden">
+            <span class="count-label connected">Google Drive connected</span>
+            <button id="drive-disconnect" class="link-button">Disconnect</button>
+          </div>
+        </div>
+
+        <div class="rule server-feature"></div>
+        <div class="field server-feature">
+          <span class="field-label">Durable image URLs</span>
+          <div id="cloudinary-connect" class="connect-box">
+            <div class="connect-fields">
+              <input id="cloudinary-cloud" type="text" placeholder="Cloud name" autocomplete="off" spellcheck="false">
+              <input id="cloudinary-key" type="text" placeholder="API key" autocomplete="off" spellcheck="false">
+              <input id="cloudinary-secret" type="password" placeholder="API secret" autocomplete="off">
+            </div>
+            <button id="cloudinary-save" class="ghost-button">Connect Cloudinary</button>
+            <p id="cloudinary-status" class="hint hidden"></p>
+            <p class="mode-copy">Optional, but worth it before a listing run. Drive serves images through a Google address that is undocumented and has broken before; Cloudinary URLs are permanent and on a real CDN, so the links in your sheet still work days later. Sign up free at <b>cloudinary.com</b>, then either fill the three boxes or just paste the dashboard's <b>API environment variable</b> (<code>cloudinary://key:secret@cloud</code>) into any one of them. Without this the sheet falls back to Drive URLs.</p>
+          </div>
+          <div id="cloudinary-connected-row" class="hidden">
+            <span id="cloudinary-name" class="count-label connected">Cloudinary connected</span>
+            <a id="cloudinary-proof" class="link-button hidden" target="_blank" rel="noopener">View test image</a>
+            <button id="cloudinary-disconnect" class="link-button">Disconnect</button>
+          </div>
+          <p id="cloudinary-saved-copy" class="mode-copy">Saved to the launcher's settings file and reused on every run — entered once, not per session.</p>
         </div>
       </section>
 
@@ -254,6 +364,7 @@ app.innerHTML = `
         <div class="field">
           <span class="field-label">Layout</span>
           <div id="layout-options" class="chip-row"></div>
+          <p id="layout-copy" class="mode-copy"></p>
         </div>
         <div class="field">
           <span class="field-label">Canvas</span>
@@ -415,6 +526,23 @@ app.innerHTML = `
         </div>
 
         <div class="rule"></div>
+        <div class="field">
+          <span class="field-label">Upload a finished folder to Drive</span>
+          <div id="drive-ready" class="hidden">
+            <input id="drive-folder" class="text-input" type="text" placeholder="Folder of images to upload" spellcheck="false">
+            <label class="toggle"><input id="drive-flipkart" type="checkbox" checked><span><b>Flipkart bulk-listing layout</b>One public master folder, a sub-folder per SKU, images renamed 1, 2, 3 — the structure Flipkart's AI auto-fill reads. Off uploads the folder as-is.</span></label>
+            <div id="ai-write-row">
+              <button id="drive-upload" class="ghost-button">Create folder &amp; upload</button>
+              <button id="drive-open" class="link-button hidden">Open in Drive</button>
+              <button id="drive-sheet" class="link-button" disabled>Listing sheet (XLSX)</button>
+              <button id="drive-stop" class="link-button hidden">Stop</button>
+            </div>
+          </div>
+          <p id="drive-copy" class="mode-copy"></p>
+          <p id="drive-locked-copy" class="mode-copy">Connect Google Drive above (Add products panel) to enable this.</p>
+        </div>
+
+        <div class="rule"></div>
         <div class="recipe-meta"><span>Combos</span><strong id="ai-combo-count">—</strong></div>
         <div class="recipe-meta"><span>Angles each</span><strong id="ai-angle-count">—</strong></div>
         <div class="recipe-meta"><span>Images to generate</span><strong id="ai-job-count">—</strong></div>
@@ -423,6 +551,7 @@ app.innerHTML = `
 
         <button id="ai-generate-button" class="primary-button" disabled><span id="ai-generate-text">Generate with Higgsfield</span><span>&rarr;</span></button>
         <button id="ai-queue-button" class="ghost-button wide-button" disabled><span id="ai-queue-text">Send to extension</span></button>
+        <button id="ai-queue-stop" class="link-button hidden">Stop</button>
         <p class="mode-copy">Writes the reference images and prompts to a folder and hands them to the Combo Maker browser extension, so you can upload and download them yourself on higgsfield.ai. Costs nothing.</p>
         <p id="ai-hint" class="hint"></p>
       </section>
@@ -432,9 +561,14 @@ app.innerHTML = `
       <div class="result-heading">
         <div><p class="eyebrow">03 / READY TO EXPORT</p><h2 id="result-title">Your combo images</h2></div>
         <div class="result-actions">
+          <div id="canvas-layout-options" class="chip-row result-chips"></div>
+          <button id="canvas-sheet" class="download-button ghost" disabled>Listing sheet (XLSX)</button>
+          <button id="canvas-drive-upload" class="download-button ghost">Save to Drive</button>
+          <button id="canvas-drive-stop" class="download-button ghost hidden">Stop</button>
           <button id="download-zip" class="download-button">Download all (ZIP) <span>&darr;</span></button>
         </div>
       </div>
+      <p id="canvas-drive-copy" class="hint"></p>
       <div id="result-grid" class="result-grid"></div>
     </section>
 
@@ -505,6 +639,16 @@ function renderControls() {
     .map((format) => `<button class="chip ${format === state.format ? 'selected' : ''}" data-format="${format}">${format === 'png' ? 'PNG' : 'JPG'}</button>`)
     .join('')
 
+  const filled = isFilled(state.layout)
+  el('#layout-copy').textContent = filled
+    ? 'Every photo fills its cell edge to edge and is cropped to fit — no margins, no gaps. Outer margin, gap, trimming and size-matching do not apply.'
+    : 'Products are fitted inside their cells, so the margin, gap and alignment settings below shape the result.'
+  // The settings a filled grid ignores are switched off rather than left to
+  // look as though they still do something.
+  for (const selector of ['#padding-input', '#gap-input', '#trim-input', '#uniform-input', '#baseline-input']) {
+    el<HTMLInputElement>(selector).disabled = filled
+  }
+
   el('#layout-label').textContent = layoutLabel(state.comboSize, state.layout)
   el('#size-label').textContent = `${RATIOS[state.ratio].width} × ${RATIOS[state.ratio].height}`
 
@@ -564,8 +708,16 @@ function renameProduct(id: number, stem: string) {
 
 function renderProducts() {
   el('#count-label').textContent = plural(state.products.length, 'image')
-  // Rewriting the list while a name is being typed would steal the caret.
-  if (productList.contains(document.activeElement)) return
+  el<HTMLButtonElement>('#download-products-zip').disabled = state.products.length === 0
+  const urlsButton = el<HTMLButtonElement>('#get-product-urls')
+  const hosting = Boolean(ai.cloudinary?.configured)
+  urlsButton.disabled = state.products.length === 0 || !hosting
+  urlsButton.title = hosting ? '' : 'Connect Cloudinary in this panel first.'
+  el('#copy-all-urls').classList.toggle('hidden', !state.products.some((product) => product.hostedUrl))
+  // Rewriting the list while a name is being typed would steal the caret. Only
+  // that one field is protected: every other control in the list expects the
+  // rows to redraw underneath it.
+  if ((document.activeElement as HTMLElement | null)?.dataset.rename) return
   const perSet = state.comboSize
   productList.innerHTML = state.products.length
     ? state.products
@@ -576,20 +728,121 @@ function renderProducts() {
           const badge = state.mode === 'sequential'
             ? (inFullSet ? `Set ${String(setIndex + 1).padStart(2, '0')}` : 'Spare')
             : ''
+          const open = framingOpen === product.id
           return `<div class="product-row">
             <img src="${product.url}" alt="Product ${index + 1}">
             <span class="product-number">${String(index + 1).padStart(2, '0')}</span>
             <input class="product-name" type="text" data-rename="${product.id}" value="${escapeHtml(nameStem(product.file.name))}" spellcheck="false" aria-label="Name for product ${index + 1}">
             <span class="product-set">${badge}</span>
             <span class="row-actions">
+              ${product.hostedUrl
+                ? `<button class="icon-button" data-copy-url="${product.id}" title="Copy image URL" aria-label="Copy image URL for ${escapeHtml(product.file.name)}">&#128279;</button>`
+                : ''}
+              <button class="icon-button framing-button${product.framing.some(isFramed) ? ' framed' : ''}${open ? ' open' : ''}" data-framing="${product.id}" aria-expanded="${open}" title="Adjust how this photo sits in each area of a combo" aria-label="Adjust framing for ${escapeHtml(product.file.name)}">&#10530;</button>
+              <a class="icon-button" href="${product.url}" download="${escapeHtml(product.file.name)}" title="Download" aria-label="Download ${escapeHtml(product.file.name)}">&dArr;</a>
               <button class="icon-button" data-move="up" data-id="${product.id}" ${index === 0 ? 'disabled' : ''} aria-label="Move up">&uarr;</button>
               <button class="icon-button" data-move="down" data-id="${product.id}" ${index === state.products.length - 1 ? 'disabled' : ''} aria-label="Move down">&darr;</button>
               <button class="icon-button remove-button" data-remove="${product.id}" aria-label="Remove ${escapeHtml(product.file.name)}">&times;</button>
             </span>
-          </div>`
+          </div>${open ? framingPanel(product) : ''}`
         })
         .join('')
     : '<div class="empty-state">Your selected products will appear here.</div>'
+
+  if (framingOpen === null) return
+  const product = state.products.find((item) => item.id === framingOpen)
+  if (product) void renderFramingPreview(product)
+  else framingOpen = null
+}
+
+/** `per` is what one slider step is worth, so degrees stay degrees. */
+const FRAMING_SLIDERS = [
+  { key: 'zoom', label: 'Zoom', min: 50, max: 250, per: 100, unit: '%' },
+  { key: 'rotate', label: 'Rotate', min: -180, max: 180, per: 1, unit: '°' },
+  { key: 'x', label: 'Left / right', min: -100, max: 100, per: 100, unit: '%' },
+  { key: 'y', label: 'Up / down', min: -100, max: 100, per: 100, unit: '%' },
+] as const
+
+/** Areas are numbered but not all alike, so the shape is named where it helps. */
+function areaLabel(cell: Rect): string {
+  const ratio = cell.width / cell.height
+  if (Math.abs(ratio - 1) < 0.02) return 'square'
+  return ratio > 1 ? 'wide' : 'tall'
+}
+
+function framingPanel(product: Product): string {
+  const { width, height } = RATIOS[state.ratio]
+  const cells = comboCells(canvasOptions())
+  // Dropping to a smaller combo can strand the selection past the last area.
+  framingArea = Math.min(framingArea, cells.length - 1)
+  const area = framingArea
+  const areas = cells.map((cell, index) => `<button class="framing-area${index === area ? ' selected' : ''}${isFramed(product.framing[index]) ? ' framed' : ''}" data-framing-area="${index}" aria-pressed="${index === area}">
+      <span class="framing-shot" data-framing-preview="${index}">
+        <span class="framing-spot" style="left:${cell.x / width * 100}%;top:${cell.y / height * 100}%;width:${cell.width / width * 100}%;height:${cell.height / height * 100}%"></span>
+      </span>
+      <span class="framing-area-label">Area ${index + 1} · ${areaLabel(cell)}</span>
+    </button>`).join('')
+  const sliders = FRAMING_SLIDERS.map((slider) => {
+    const value = Math.round(product.framing[area][slider.key] * slider.per)
+    return `<label class="framing-slider">
+      <span class="framing-label">${slider.label}</span>
+      <input type="range" min="${slider.min}" max="${slider.max}" step="1" value="${value}" data-framing-input="${slider.key}" data-id="${product.id}">
+      <span class="slider-value" data-framing-value="${slider.key}">${value}${slider.unit}</span>
+    </label>`
+  }).join('')
+  return `<div class="framing-panel">
+    <div class="framing-areas">${areas}</div>
+    <div class="framing-controls">
+      ${sliders}
+      <div class="framing-foot">
+        <p class="mode-copy">Each area is framed on its own, and every combo that puts this photo there follows. Generate again to rebuild them.</p>
+        <button class="chip" data-framing-reset="${product.id}">Reset area</button>
+      </div>
+    </div>
+  </div>`
+}
+
+/**
+ * A real combo with this photo moved into the area being previewed.
+ *
+ * Across a run the same photo lands in every slot in turn, so standing it in
+ * one deliberately is not a fiction — it is the combo the person will get.
+ */
+function previewGroup(product: Product, area: number): Product[] {
+  const found = comboGroups().find((items) => items.some((item) => item.id === product.id))
+  const pool = found ?? state.products.slice(0, state.comboSize)
+  const group = [...pool]
+  if (!group.length) return [product]
+  while (group.length < state.comboSize) group.push(pool[group.length % pool.length])
+  const from = group.indexOf(product)
+  if (from === -1) group[area] = product
+  else [group[area], group[from]] = [group[from], group[area]]
+  return group
+}
+
+/**
+ * Composes each area's thumbnail, or just one while a slider is being dragged.
+ *
+ * Framing is a property of the photo rather than of one combo, so showing it
+ * inside genuine combos is the only preview that answers the question being
+ * asked — what this change does to all of them.
+ */
+let framingPreviewToken = 0
+async function renderFramingPreview(product: Product, only?: number) {
+  const token = ++framingPreviewToken
+  const options = canvasOptions()
+  for (const [area] of comboCells(options).entries()) {
+    if (only !== undefined && only !== area) continue
+    const shot = productList.querySelector<HTMLElement>(`[data-framing-preview="${area}"]`)
+    if (!shot) continue
+    const canvas = composeCombo(await framedImages(previewGroup(product, area)), options)
+    // Decoding is async, so the panel may have closed or been overtaken by a
+    // later drag by the time the photos are ready.
+    if (token !== framingPreviewToken || !shot.isConnected) return
+    canvas.className = 'framing-canvas'
+    shot.querySelector('canvas')?.remove()
+    shot.prepend(canvas)
+  }
 }
 
 function renderResults() {
@@ -601,6 +854,9 @@ function renderResults() {
       <div class="result-foot"><span>${escapeHtml(result.name)}</span><a href="${result.url}" download="${escapeHtml(result.name)}">Download</a></div>
     </div>`)
     .join('')
+  // Keeps the canvas tab's "Save to Drive" button in sync even when results
+  // change outside a full refresh() — generate() renders incrementally.
+  renderDrive()
 }
 
 /**
@@ -613,6 +869,9 @@ function renderResults() {
 function currentSettings(): Record<string, unknown> {
   return {
     canvas: { ...state, products: undefined },
+    // Framing belongs to the photo, and ids are reassigned on load, so it
+    // travels by position just like the captions below.
+    framing: state.products.map((product) => product.framing),
     ai: {
       angles: ai.angles,
       subject: ai.subject,
@@ -661,8 +920,10 @@ function applySettings(settings: Record<string, unknown>) {
   ai.perCombo = Boolean(saved.perCombo)
   ai.writtenPrompts = (saved.writtenPrompts as Record<string, string>) ?? {}
   ai.captions = {}
+  const framing = Array.isArray(settings.framing) ? settings.framing : []
   state.products.forEach((product, index) => {
     if (captions[index]) ai.captions[product.id] = captions[index]
+    product.framing = framingSlots(framing[index])
   })
 
   // The controls read their values from state on render, except the free-text
@@ -724,10 +985,9 @@ function addFiles(files: FileList | File[]) {
   const accepted = incoming.slice(0, Math.max(0, room))
   state.products = [
     ...state.products,
-    ...accepted.map((file) => ({ id: nextId++, file, url: URL.createObjectURL(file) })),
+    ...accepted.map((file) => ({ id: nextId++, file, url: URL.createObjectURL(file), framing: framingSlots() })),
   ]
   refresh()
-void refreshTemplates()
   if (incoming.length > accepted.length) {
     const message = `Only ${MAX_PRODUCTS} images fit at once — ${incoming.length - accepted.length} were skipped.`
     const target = tab === 'ai' ? aiHint : hint
@@ -804,10 +1064,33 @@ fileInput.addEventListener('change', () => {
 
 productList.addEventListener('input', (event) => {
   const input = event.target as HTMLInputElement
-  if (!input.dataset.rename) return
-  renameProduct(Number(input.dataset.rename), input.value)
-  renderControls()
-  renderAiControls()
+  if (input.dataset.rename) {
+    renameProduct(Number(input.dataset.rename), input.value)
+    renderControls()
+    renderAiControls()
+    return
+  }
+  const slider = FRAMING_SLIDERS.find((entry) => entry.key === input.dataset.framingInput)
+  if (!slider) return
+  const product = state.products.find((item) => item.id === Number(input.dataset.id))
+  if (!product) return
+  const area = framingArea
+  product.framing[area] = { ...product.framing[area], [slider.key]: Number(input.value) / slider.per }
+  // Redrawing the whole list mid-drag would tear the slider out from under the
+  // pointer, so the pieces that changed are updated in place — and only this
+  // area's thumbnail, since recomposing all of them on every step would lag.
+  const readout = input.parentElement?.querySelector(`[data-framing-value="${slider.key}"]`)
+  if (readout) readout.textContent = `${input.value}${slider.unit}`
+  productList.querySelector(`[data-framing="${product.id}"]`)?.classList.toggle('framed', product.framing.some(isFramed))
+  productList.querySelector(`[data-framing-area="${area}"]`)?.classList.toggle('framed', isFramed(product.framing[area]))
+  void renderFramingPreview(product, area)
+})
+
+// The other areas share the photo, so they catch up once the drag ends.
+productList.addEventListener('change', (event) => {
+  if (!(event.target as HTMLElement).dataset.framingInput) return
+  const product = state.products.find((item) => item.id === framingOpen)
+  if (product) void renderFramingPreview(product)
 })
 
 productList.addEventListener('click', (event) => {
@@ -815,7 +1098,36 @@ productList.addEventListener('click', (event) => {
   const remove = target.closest<HTMLButtonElement>('[data-remove]')
   if (remove) return dropProduct(Number(remove.dataset.remove))
   const move = target.closest<HTMLButtonElement>('[data-move]')
-  if (move) moveProduct(Number(move.dataset.id), move.dataset.move as 'up' | 'down')
+  if (move) return moveProduct(Number(move.dataset.id), move.dataset.move as 'up' | 'down')
+  const copy = target.closest<HTMLButtonElement>('[data-copy-url]')
+  if (copy) {
+    const product = state.products.find((item) => item.id === Number(copy.dataset.copyUrl))
+    if (product?.hostedUrl) void copyText(product.hostedUrl, 'Image URL copied.')
+    return
+  }
+  const pick = target.closest<HTMLButtonElement>('[data-framing-area]')
+  if (pick) {
+    framingArea = Number(pick.dataset.framingArea)
+    renderProducts()
+    return
+  }
+  const adjust = target.closest<HTMLButtonElement>('[data-framing]')
+  if (adjust) {
+    const id = Number(adjust.dataset.framing)
+    framingOpen = framingOpen === id ? null : id
+    renderProducts()
+    if (framingOpen !== null) {
+      productList.querySelector('.framing-panel')?.scrollIntoView({ block: 'nearest' })
+    }
+    return
+  }
+  const reset = target.closest<HTMLButtonElement>('[data-framing-reset]')
+  if (reset) {
+    const product = state.products.find((item) => item.id === Number(reset.dataset.framingReset))
+    if (!product) return
+    product.framing[framingArea] = { ...DEFAULT_FRAMING }
+    renderProducts()
+  }
 })
 
 dropzone.addEventListener('dragover', (event) => {
@@ -902,7 +1214,7 @@ el('#template-list').addEventListener('click', async (event) => {
     state.products = template.products.map((product) => {
       const bytes = Uint8Array.from(atob(product.data), (char) => char.charCodeAt(0))
       const file = new File([bytes], product.name, { type: product.type })
-      return { id: nextId++, file, url: URL.createObjectURL(file) }
+      return { id: nextId++, file, url: URL.createObjectURL(file), framing: framingSlots() }
     })
     applySettings(template.settings)
     el<HTMLInputElement>('#template-name').value = template.name
@@ -963,13 +1275,36 @@ el<HTMLInputElement>('#baseline-input').addEventListener('change', (event) => {
 
 /* ---------------- generation ---------------- */
 
-async function preparedFor(product: Product): Promise<PreparedImage> {
-  const key = `${product.id}:${state.trim}`
+async function preparedFor(product: Product, forceTrim?: boolean): Promise<PreparedImage> {
+  // A filled grid shows the photographs themselves, so trimming to the product
+  // would cut away the very background it is meant to display.
+  const trim = forceTrim ?? (isFilled(state.layout) ? false : state.trim)
+  const key = `${product.id}:${trim}`
   const cached = prepCache.get(key)
   if (cached) return cached
-  const prepared = await prepareImage(product.file, state.trim)
+  const prepared = await prepareImage(product.file, trim)
   prepCache.set(key, prepared)
   return prepared
+}
+
+/** The Canvas tab's settings as one compose call, shared with the framing preview. */
+function canvasOptions(): ComposeOptions {
+  return {
+    size: state.comboSize,
+    layout: state.layout,
+    ratio: state.ratio,
+    // JPEG has no alpha channel, so a transparent request has to land on white.
+    background: state.format === 'jpeg' && state.background === 'transparent' ? '#ffffff' : state.background,
+    padding: state.padding / 100,
+    gap: state.gap / 100,
+    uniformScale: state.uniformScale,
+    align: state.align,
+  }
+}
+
+/** Each photo in a combo, framed for the area it happens to land in. */
+function framedImages(group: Product[]): Promise<ComposeImage[]> {
+  return Promise.all(group.map(async (product, area) => ({ ...(await preparedFor(product)), framing: product.framing[area] })))
 }
 
 /**
@@ -980,16 +1315,25 @@ async function preparedFor(product: Product): Promise<PreparedImage> {
  * since a JPEG reference carries no alpha.
  */
 async function compositeReference(group: Product[]): Promise<HTMLCanvasElement> {
-  const images = await Promise.all(group.map(preparedFor))
+  // The AI reference is a different job from a canvas export. Every prompt
+  // tells the model the reference is "a flat working layout on a plain
+  // background", so it has to stay exactly that: trimmed products, spaced, on
+  // a plain ground. A filled grid would hand it cropped photographs of other
+  // people's backdrops and quietly make the prompt a lie.
+  const images = await Promise.all(group.map((product) => preparedFor(product, true)))
+  const layout = isFilled(state.layout)
+    ? (state.comboSize === 4 ? 'grid' : 'row')
+    : normalizeLayout(state.comboSize, state.layout)
+  const spaced = isFilled(state.layout)
   return composeCombo(images, {
     size: state.comboSize,
-    layout: normalizeLayout(state.comboSize, state.layout),
+    layout,
     ratio: state.ratio,
     background: state.background === 'transparent' ? '#ffffff' : state.background,
-    padding: state.padding / 100,
-    gap: state.gap / 100,
-    uniformScale: state.uniformScale,
-    align: state.align,
+    padding: spaced ? 0.06 : state.padding / 100,
+    gap: spaced ? 0.03 : state.gap / 100,
+    uniformScale: spaced ? true : state.uniformScale,
+    align: spaced ? 'center' : state.align,
   })
 }
 
@@ -1006,8 +1350,6 @@ async function generate() {
   generateButton.disabled = true
   clearResults()
 
-  // JPEG has no alpha channel, so a transparent request has to land on white.
-  const background = state.format === 'jpeg' && state.background === 'transparent' ? '#ffffff' : state.background
   const extension = state.format === 'png' ? 'png' : 'jpg'
   const mime = state.format === 'png' ? 'image/png' : 'image/jpeg'
   const usedNames = new Set<string>()
@@ -1020,23 +1362,14 @@ async function generate() {
       // Yield so the label above actually paints between sets.
       await new Promise((resolve) => setTimeout(resolve, 0))
 
-      const images = await Promise.all(group.map(preparedFor))
-      const canvas = composeCombo(images, {
-        size: state.comboSize,
-        layout: state.layout,
-        ratio: state.ratio,
-        background,
-        padding: state.padding / 100,
-        gap: state.gap / 100,
-        uniformScale: state.uniformScale,
-        align: state.align,
-      })
+      const canvas = composeCombo(await framedImages(group), canvasOptions())
       const blob = await canvasToBlob(canvas, mime, state.format === 'jpeg' ? 0.92 : undefined)
       results.push({
         name: comboName(group.map((product) => product.file.name), extension, usedNames),
         blob,
         url: URL.createObjectURL(blob),
         index: index + 1,
+        sources: group.map((product) => product.file),
       })
       renderResults()
     }
@@ -1055,14 +1388,124 @@ async function generate() {
 
 generateButton.addEventListener('click', generate)
 
+/**
+ * A status line dedicated to this action, inside the Add products panel.
+ *
+ * The panel is shared between both tabs, so this is visible regardless of
+ * which one the person is on — say() alone would risk writing into the AI
+ * tab's hint line while the person is looking at Canvas, or the reverse.
+ */
+function sayProductUrls(text: string, error = false) {
+  const line = el('#product-urls-status')
+  line.classList.remove('hidden')
+  line.className = error ? 'hint error' : 'hint'
+  line.textContent = text
+}
+
+async function copyText(text: string, confirmMessage: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    sayProductUrls(confirmMessage)
+  } catch {
+    // A blocked clipboard (an insecure context, a denied permission) should
+    // not leave the person with nothing — the value is still shown for a
+    // manual copy instead of just failing silently.
+    sayProductUrls(`Could not copy automatically — here it is: ${text}`, true)
+  }
+}
+
+el('#get-product-urls').addEventListener('click', async () => {
+  if (!state.products.length) return
+  if (!ai.cloudinary?.configured) {
+    sayProductUrls('Connect Cloudinary first — the panel is right below this one.', true)
+    return
+  }
+  const button = el<HTMLButtonElement>('#get-product-urls')
+  button.disabled = true
+  button.textContent = 'Uploading...'
+  // Snapshotted so a product added or removed mid-upload cannot be matched to
+  // the wrong result when the response comes back.
+  const batch = state.products.map((product) => ({ id: product.id, file: product.file }))
+  const folder = `Product photos ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
+  sayProductUrls(`Uploading ${plural(batch.length, 'image')} to Cloudinary...`)
+  try {
+    const { results } = await uploadProductImages(
+      folder,
+      await Promise.all(batch.map(async ({ file }) => ({ name: file.name, type: file.type, data: await fileToBase64(file) }))),
+    )
+    let done = 0
+    let failed = 0
+    results.forEach((result, index) => {
+      const id = batch[index]?.id
+      const product = state.products.find((item) => item.id === id)
+      if (!product) return
+      if (result.url) {
+        product.hostedUrl = result.url
+        done += 1
+      } else {
+        failed += 1
+      }
+    })
+    renderProducts()
+    sayProductUrls(
+      failed
+        ? `${done} of ${results.length} uploaded — ${failed} failed. Click the link icon on a row to copy its URL.`
+        : `${done} image${done === 1 ? '' : 's'} uploaded. Click the link icon on a row, or "Copy all URLs", to grab the links.`,
+      Boolean(failed && !done),
+    )
+  } catch (error) {
+    sayProductUrls(error instanceof Error ? error.message : 'Could not upload those images.', true)
+  } finally {
+    button.disabled = state.products.length === 0 || !ai.cloudinary?.configured
+    button.textContent = 'Get image URLs'
+  }
+})
+
+el('#copy-all-urls').addEventListener('click', async () => {
+  const urls = state.products.map((product) => product.hostedUrl).filter((url): url is string => Boolean(url))
+  if (!urls.length) return
+  await copyText(urls.join('\n'), `Copied ${plural(urls.length, 'URL')}.`)
+})
+
+el('#download-products-zip').addEventListener('click', async () => {
+  if (!state.products.length) return
+  // Two products can end up with the same name after a manual rename; a
+  // silent overwrite inside the zip would lose one of them, so a collision
+  // gets a numbered suffix the same way a filesystem would handle it.
+  const used = new Set<string>()
+  const entries: ZipEntry[] = []
+  for (const product of state.products) {
+    const dot = product.file.name.lastIndexOf('.')
+    const stem = dot > 0 ? product.file.name.slice(0, dot) : product.file.name
+    const extension = dot > 0 ? product.file.name.slice(dot) : ''
+    let name = product.file.name
+    for (let n = 2; used.has(name); n++) name = `${stem} (${n})${extension}`
+    used.add(name)
+    entries.push({ name, data: new Uint8Array(await product.file.arrayBuffer()) })
+  }
+  const url = URL.createObjectURL(createZip(entries))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'product-photos.zip'
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+})
+
 el('#download-zip').addEventListener('click', async () => {
   if (!results.length) return
-  const entries: ZipEntry[] = await Promise.all(
-    results.map(async (result) => ({
-      name: result.name,
-      data: new Uint8Array(await result.blob.arrayBuffer()),
-    })),
-  )
+  // A path with a slash becomes a real folder when the zip is unpacked, so the
+  // archive arrives in the shape Flipkart wants rather than needing rearranging.
+  const flat = ai.canvasLayout === 'flat'
+  const entries: ZipEntry[] = []
+  for (const result of results) {
+    const { sku, files } = comboFiles(result)
+    for (const file of files) {
+      entries.push({
+        name: flat ? file.name : `${sku}/${file.name}`,
+        data: new Uint8Array(await file.source.arrayBuffer()),
+      })
+    }
+  }
   const url = URL.createObjectURL(createZip(entries))
   const link = document.createElement('a')
   link.href = url
@@ -1070,6 +1513,118 @@ el('#download-zip').addEventListener('click', async () => {
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 })
+
+const LAYOUTS_OUT = [
+  { id: 'combo', label: 'Combo only', hint: 'One folder per SKU holding the combo image as 1. The listing sheet gets a hero URL and nothing else.' },
+  { id: 'combo+sources', label: 'Combo + source photos', hint: 'The combo as 1, then each product photo it was made from as 2, 3, 4 — and a listing sheet with a URL column for every one of them.' },
+  { id: 'flat', label: 'Flat files', hint: 'No folders — every combo as a single file, original name.' },
+] as const
+
+const extensionOf = (name: string) => /\.[a-z0-9]+$/i.exec(name)?.[0]?.toLowerCase() ?? '.png'
+const skuOf = (name: string) => name.slice(0, name.length - extensionOf(name).length)
+
+/**
+ * The files one combo contributes, already named the way they must land.
+ *
+ * Flipkart reads a folder per SKU with the pictures numbered 1, 2, 3 inside
+ * and ignores anything named otherwise — so the numbering is the point, and
+ * the hero (the combo itself) has to be 1. "Combo + source photos" adds the
+ * individual product shots after it, which is what fills the extra image slots
+ * on a listing.
+ */
+function comboFiles(result: Result): { sku: string; files: { name: string; source: Blob }[] } {
+  const sku = skuOf(result.name)
+  if (ai.canvasLayout === 'flat') {
+    return { sku, files: [{ name: result.name, source: result.blob }] }
+  }
+  const files = [{ name: `1${extensionOf(result.name)}`, source: result.blob as Blob }]
+  if (ai.canvasLayout === 'combo+sources') {
+    result.sources.forEach((file, index) => {
+      files.push({ name: `${index + 2}${extensionOf(file.name)}`, source: file })
+    })
+  }
+  return { sku, files }
+}
+
+/** A canvas result's blob as base64, for the Drive upload route. */
+function resultToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result).split(',', 2)[1] ?? '')
+    reader.onerror = () => reject(new Error('Could not read a generated combo image.'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+/** Combos per request when uploading to Drive, to keep each body modest. */
+const DRIVE_BATCH = 25
+
+el('#canvas-drive-upload').addEventListener('click', async () => {
+  if (!results.length) return
+  const toDrive = Boolean(ai.drive?.connected)
+  const toCloud = Boolean(ai.cloudinary?.configured)
+  if (!toDrive && !toCloud) {
+    say('Connect Google Drive or Cloudinary first — both panels are under Add products.')
+    return
+  }
+  const folderName = `Canvas combos ${state.comboSize}-up ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
+  const perCombo = comboFiles(results[0]).files.length
+  const total = results.reduce((sum, result) => sum + comboFiles(result).files.length, 0)
+  const shape = ai.canvasLayout === 'flat'
+    ? 'as loose files'
+    : `as ${results.length} SKU folders (${perCombo} image${perCombo === 1 ? '' : 's'} each)`
+  // Naming the destination in the prompt, because with Drive disconnected the
+  // images go somewhere else entirely and that should not be a surprise.
+  const where = toDrive && toCloud
+    ? 'Google Drive (shared publicly so Flipkart can read them) and Cloudinary'
+    : toDrive
+      ? 'Google Drive, shared publicly so Flipkart can read them'
+      : `Cloudinary (${ai.cloudinary?.cloudName})`
+  const thin = ai.canvasLayout === 'combo'
+    ? '\n\nNote: "Combo only" uploads just the combo image, so the listing sheet will have a hero URL and no Image 2/3/4 columns. Pick "Combo + source photos" if you want those.'
+    : ''
+  if (!window.confirm(`Upload ${total} images to ${where}?\n\nFolder: "${folderName}"\nThey go up ${shape}.${thin}`)) return
+
+  ai.driveBusy = true
+  renderDrive()
+  try {
+    await startDriveImages(folderName, ai.canvasLayout)
+    // Sent in batches: a few hundred combos with their source photos is far
+    // more than one request can carry.
+    for (let start = 0; start < results.length; start += DRIVE_BATCH) {
+      if (ai.drive?.run?.status === 'cancelled') break
+      const groups: DriveGroup[] = []
+      for (const result of results.slice(start, start + DRIVE_BATCH)) {
+        const { sku, files } = comboFiles(result)
+        groups.push({
+          sku,
+          files: await Promise.all(
+            files.map(async (file) => ({
+              name: file.name,
+              type: file.source.type || 'image/png',
+              data: await resultToBase64(file.source),
+            })),
+          ),
+        })
+      }
+      await sendDriveImages(groups)
+      await refreshDrive()
+    }
+    await finishDriveImages()
+    await refreshDrive()
+    say(`Uploaded to ${toDrive ? 'Drive' : 'Cloudinary'}. The listing sheet is ready to download.`)
+  } catch (error) {
+    say(error instanceof Error ? error.message : 'Could not finish that upload.', true)
+  } finally {
+    ai.driveBusy = false
+    renderDrive()
+  }
+})
+
+/** Served by the launcher, built from the ids Drive returned on upload. */
+const openListingSheet = () => window.open(LISTING_SHEET_URL, '_blank', 'noopener')
+el('#canvas-sheet').addEventListener('click', openListingSheet)
+el('#drive-sheet').addEventListener('click', openListingSheet)
 
 /* ---------------- AI section ---------------- */
 
@@ -1173,6 +1728,7 @@ function renderAiControls() {
 
   renderPromptWriter()
   renderReverse()
+  renderDrive()
 
   const groups = comboGroups()
   const jobs = aiJobCount()
@@ -1201,6 +1757,7 @@ function renderAiControls() {
   // The queue needs no credentials and spends nothing, so it only wants combos.
   el<HTMLButtonElement>('#ai-queue-button').disabled =
     ai.starting || ai.queueing || !groups.length || !ai.angles.length
+  el('#ai-queue-stop').classList.toggle('hidden', !ai.queueing)
 
   if (notice) {
     aiHint.className = notice.error ? 'hint error' : 'hint'
@@ -1263,6 +1820,84 @@ function renderDescribe() {
       <input type="text" data-caption="${product.id}" value="${escapeHtml(ai.captions[product.id] ?? '')}" placeholder="Not described" spellcheck="false">
     </label>`)
     .join('')
+}
+
+function renderDrive() {
+  const status = ai.drive
+  const connected = Boolean(status?.connected)
+
+  // Connecting lives in the shared Add-products panel, so both tabs see it.
+  el('#drive-connect').classList.toggle('hidden', connected)
+  // A saved client means disconnecting is recoverable without the console.
+  el('#drive-reconnect-row').classList.toggle('hidden', connected || !status?.hasClient)
+  el('#drive-connected-row').classList.toggle('hidden', !connected)
+
+  // The AI tab's folder-upload controls only make sense once connected.
+  el('#drive-ready').classList.toggle('hidden', !connected)
+  el('#drive-locked-copy').classList.toggle('hidden', connected)
+
+  const folder = el<HTMLInputElement>('#drive-folder')
+  if (document.activeElement !== folder) {
+    folder.value = ai.driveFolder
+    folder.placeholder = ai.queue?.directory ?? 'Folder of images to upload'
+  }
+  el<HTMLInputElement>('#drive-flipkart').checked = ai.driveFlipkart
+
+  const run = status?.run
+  const running = run?.status === 'running'
+  const button = el<HTMLButtonElement>('#drive-upload')
+  button.disabled = ai.driveBusy || running
+  button.textContent = running ? 'Uploading...' : 'Create folder & upload'
+  el('#drive-open').classList.toggle('hidden', !run?.link)
+  el('#drive-stop').classList.toggle('hidden', !running)
+
+  // A Cloudinary failure is not fatal to the upload, so it would otherwise pass
+  // unnoticed — but it decides whether the sheet carries durable URLs or falls
+  // back to Drive ones, which is exactly what the user needs to know before
+  // pasting several hundred links into a listing.
+  const mirrorNote = () => {
+    if (!run || !ai.cloudinary?.configured) return ''
+    const uploaded = run.done + run.skipped
+    if (run.hostError) return ` Durable URLs: ${run.hosted ?? 0} of ${uploaded} — ${run.hostError}`
+    return run.hosted ? ` ${run.hosted} durable URLs.` : ''
+  }
+
+  const runLine = (label: string) =>
+    run
+      ? `${run.folder}: ${run.done} uploaded${run.skipped ? `, ${run.skipped} already there` : ''}${run.failed ? `, ${run.failed} failed` : ''} of ${run.total}.${run.error ? ` ${run.error}` : ''}${mirrorNote()}`
+      : label
+
+  el('#drive-copy').textContent = !connected
+    ? ''
+    : runLine('Creates a Drive folder named after this folder and mirrors every image into it, keeping the combo subfolders.')
+
+  // The canvas tab's own controls and status line, driven by the same run state.
+  const canvasButton = el<HTMLButtonElement>('#canvas-drive-upload')
+  const hosting = Boolean(ai.cloudinary?.configured)
+  canvasButton.disabled = ai.driveBusy || running || !results.length || (!connected && !hosting)
+  canvasButton.textContent = connected ? 'Save to Drive' : hosting ? 'Upload to Cloudinary' : 'Save to Drive'
+  canvasButton.title = connected || hosting
+    ? ''
+    : 'Connect Google Drive or Cloudinary in the Add products panel first.'
+  canvasButton.classList.toggle('hidden', running)
+  el('#canvas-drive-stop').classList.toggle('hidden', !running)
+  el('#canvas-layout-options').innerHTML = LAYOUTS_OUT
+    .map((option) => `<button class="chip ${option.id === ai.canvasLayout ? 'selected' : ''}" data-canvas-layout="${option.id}" title="${escapeHtml(option.hint)}">${option.label}</button>`)
+    .join('')
+  // The sheet is built from a finished upload's manifest, so it cannot exist
+  // before one has run. Shown disabled rather than hidden: a button that
+  // silently is not there reads as a missing feature, and the reason for the
+  // wait — upload first — is exactly what the person needs told to them.
+  const sheetReady = Boolean(run && run.status !== 'running' && (run.done > 0 || run.skipped > 0))
+  const sheetWhy = running
+    ? 'Available when this upload finishes.'
+    : 'Upload your combos first — the sheet is built from what was uploaded.'
+  for (const id of ['#canvas-sheet', '#drive-sheet']) {
+    const button = el<HTMLButtonElement>(id)
+    button.disabled = !sheetReady
+    button.title = sheetReady ? 'Download the listing sheet' : sheetWhy
+  }
+  el('#canvas-drive-copy').textContent = results.length ? runLine('') : ''
 }
 
 function renderReverse() {
@@ -1444,6 +2079,272 @@ el('#ai-or-connect').addEventListener('click', async () => {
 el<HTMLInputElement>('#ai-per-combo').addEventListener('change', (event) => {
   ai.perCombo = (event.target as HTMLInputElement).checked
   refresh()
+})
+
+/* ---------------- Google Drive ---------------- */
+
+let drivePoll: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Keeps the page's idea of the Drive connection from going stale.
+ *
+ * The connection itself is finished server-side the moment the OAuth popup
+ * redirects back to the launcher — the refresh token lands in .env whether or
+ * not this tab is even still open. But this tab only *knows* that once it asks
+ * again, and the one place that used to ask was the 60-attempt loop under the
+ * Connect button, which gives up after two minutes. Consenting slower than
+ * that, or in a different tab/window, left the page showing "not connected"
+ * forever with no way to notice short of a manual reload — so it keeps
+ * checking quietly in the background until it is connected, and checks again
+ * whenever the tab regains focus (the moment someone comes back from the
+ * Google consent tab).
+ */
+async function refreshDrive() {
+  if (STATIC_HOST) return
+  try {
+    ai.drive = await driveStatus()
+  } catch {
+    ai.drive = null
+  }
+  renderDrive()
+  if (drivePoll) clearTimeout(drivePoll)
+  if (ai.drive?.run?.status === 'running') {
+    drivePoll = setTimeout(refreshDrive, 1500)
+  } else if (!ai.drive?.connected) {
+    drivePoll = setTimeout(refreshDrive, 6000)
+  }
+}
+
+/**
+ * Cloudinary's state is its own: it is configured once from a settings file
+ * and never goes through a consent round-trip, so it needs no polling.
+ */
+async function refreshCloudinary() {
+  try {
+    ai.cloudinary = await cloudinaryStatus()
+  } catch {
+    ai.cloudinary = null
+  }
+  renderCloudinary()
+  // The upload button names its destination, and the "Get image URLs" button
+  // is gated on this — both depend on it.
+  renderDrive()
+  renderProducts()
+}
+
+function renderCloudinary() {
+  const status = ai.cloudinary
+  const configured = Boolean(status?.configured)
+  el('#cloudinary-connect').classList.toggle('hidden', configured)
+  el('#cloudinary-connected-row').classList.toggle('hidden', !configured)
+  if (configured) {
+    // Naming the account, not just the fact of a connection: with the secret
+    // write-only there is otherwise no way to tell which one is saved.
+    el('#cloudinary-name').textContent =
+      `Cloudinary connected — ${status?.cloudName}${status?.apiKeyHint ? ` (key ${status.apiKeyHint})` : ''}`
+    el('#cloudinary-proof').classList.toggle('hidden', !status?.checkUrl)
+    if (status?.checkUrl) el<HTMLAnchorElement>('#cloudinary-proof').href = status.checkUrl
+    return
+  }
+  // Coming back to a half-filled form, the cloud name is the one value worth
+  // restoring — the secret is deliberately never sent back to the page.
+  const cloud = el<HTMLInputElement>('#cloudinary-cloud')
+  if (status?.cloudName && !cloud.value) cloud.value = status.cloudName
+}
+
+/**
+ * Reports next to the button that was pressed.
+ *
+ * say() renders into the AI tab's hint line, which is a different panel
+ * entirely — press Connect from the canvas tab and the answer, success or
+ * failure, appears somewhere off screen. A box that can fail needs to say so
+ * where the person is looking.
+ */
+function sayCloudinary(text: string, error = false) {
+  const line = el('#cloudinary-status')
+  line.className = error ? 'hint error' : 'hint'
+  line.textContent = text
+}
+
+el('#cloudinary-save').addEventListener('click', async () => {
+  const cloudName = el<HTMLInputElement>('#cloudinary-cloud').value.trim()
+  const apiKey = el<HTMLInputElement>('#cloudinary-key').value.trim()
+  const apiSecret = el<HTMLInputElement>('#cloudinary-secret').value.trim()
+  const button = el<HTMLButtonElement>('#cloudinary-save')
+  const pastedUrl = [cloudName, apiKey, apiSecret].some((value) => /cloudinary:\/\/\S+:\S+@\S+/i.test(value))
+  if (!pastedUrl && (!cloudName || !apiKey || !apiSecret)) {
+    sayCloudinary('Fill in all three boxes, or paste the API environment variable into any one of them.', true)
+    return
+  }
+  button.disabled = true
+  sayCloudinary('Checking those details by uploading a test image...')
+  try {
+    const status = await saveCloudinary(cloudName, apiKey, apiSecret)
+    // The secret is in the settings file now; no reason to leave it on screen.
+    el<HTMLInputElement>('#cloudinary-secret').value = ''
+    ai.cloudinary = status
+    renderCloudinary()
+    renderDrive()
+    renderProducts()
+    const message = `Cloudinary connected to "${status.cloudName}" and saved — a test image uploaded successfully. You will not need to enter this again.`
+    sayCloudinary(message)
+    say(message)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not save those credentials.'
+    sayCloudinary(message, true)
+    say(message, true)
+  } finally {
+    button.disabled = false
+  }
+})
+
+el('#cloudinary-disconnect').addEventListener('click', async () => {
+  try {
+    ai.cloudinary = await disconnectCloudinary()
+  } catch {
+    ai.cloudinary = null
+  }
+  renderCloudinary()
+  renderDrive()
+  renderProducts()
+  say('Cloudinary disconnected — sheets will fall back to Drive URLs.')
+})
+
+const recheckDriveOnReturn = () => {
+  if (document.visibilityState === 'visible' && !ai.drive?.connected) refreshDrive()
+}
+window.addEventListener('focus', recheckDriveOnReturn)
+document.addEventListener('visibilitychange', recheckDriveOnReturn)
+
+el<HTMLInputElement>('#drive-folder').addEventListener('input', (event) => {
+  ai.driveFolder = (event.target as HTMLInputElement).value
+})
+
+el<HTMLInputElement>('#drive-flipkart').addEventListener('change', (event) => {
+  ai.driveFlipkart = (event.target as HTMLInputElement).checked
+})
+
+el('#drive-reconnect').addEventListener('click', async () => {
+  const button = el<HTMLButtonElement>('#drive-reconnect')
+  button.disabled = true
+  try {
+    const { authUrl } = await reconnectDrive()
+    window.open(authUrl, '_blank', 'noopener')
+    say('Approve access in the tab that opened, then come back.')
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      await refreshDrive()
+      if (ai.drive?.connected) {
+        say('Google Drive reconnected.')
+        break
+      }
+    }
+  } catch (error) {
+    say(error instanceof Error ? error.message : 'Could not reconnect.', true)
+  } finally {
+    button.disabled = false
+    renderDrive()
+  }
+})
+
+el('#drive-save').addEventListener('click', async () => {
+  const id = el<HTMLInputElement>('#drive-client-id').value.trim()
+  const secret = el<HTMLInputElement>('#drive-client-secret').value.trim()
+  const button = el<HTMLButtonElement>('#drive-save')
+  button.disabled = true
+  try {
+    const { authUrl } = await saveDriveClient(id, secret)
+    el<HTMLInputElement>('#drive-client-secret').value = ''
+    // Consent happens on Google, then Google redirects back to the launcher.
+    window.open(authUrl, '_blank', 'noopener')
+    say('Approve access in the tab that opened, then come back.')
+    // The callback lands on the launcher, not here, so poll for the result.
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      await refreshDrive()
+      if (ai.drive?.connected) {
+        say('Google Drive connected.')
+        break
+      }
+    }
+  } catch (error) {
+    say(error instanceof Error ? error.message : 'Could not save that client.', true)
+  } finally {
+    button.disabled = false
+    renderDrive()
+  }
+})
+
+el('#drive-disconnect').addEventListener('click', async () => {
+  if (!window.confirm('Disconnect Google Drive? Files already uploaded stay where they are.')) return
+  try {
+    await disconnectDrive()
+    await refreshDrive()
+    say('Google Drive disconnected.')
+  } catch (error) {
+    say(error instanceof Error ? error.message : 'Could not disconnect.', true)
+  }
+})
+
+el('#drive-stop').addEventListener('click', async () => {
+  try {
+    await cancelDriveUpload()
+    await refreshDrive()
+    say('Upload stopped. What was already uploaded stays in Drive.')
+  } catch (error) {
+    say(error instanceof Error ? error.message : 'Could not stop the upload.', true)
+  }
+})
+
+el('#canvas-layout-options').addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-canvas-layout]')
+  if (!button) return
+  ai.canvasLayout = button.dataset.canvasLayout as typeof ai.canvasLayout
+  renderDrive()
+})
+
+el('#canvas-drive-stop').addEventListener('click', async () => {
+  try {
+    await cancelDriveUpload()
+    await refreshDrive()
+    say('Upload stopped. What was already uploaded stays in Drive.')
+  } catch (error) {
+    say(error instanceof Error ? error.message : 'Could not stop the upload.', true)
+  }
+})
+
+el('#drive-open').addEventListener('click', () => {
+  const link = ai.drive?.run?.link
+  if (link) window.open(link, '_blank', 'noopener')
+})
+
+el('#drive-upload').addEventListener('click', async () => {
+  const folder = ai.driveFolder.trim() || ai.queue?.directory || ''
+  if (!folder) {
+    say('Point it at a folder of images first.', true)
+    return
+  }
+  ai.driveBusy = true
+  renderDrive()
+  try {
+    const scan = await scanDriveFolder(folder)
+    if (!scan.images) {
+      say(`No images under ${folder}.`, true)
+      return
+    }
+    const shape = ai.driveFlipkart
+      ? `\n\nThey will be laid out for Flipkart: a sub-folder per SKU, images renamed 1, 2, 3, and the master folder shared publicly so Flipkart can read it.`
+      : ''
+    if (!window.confirm(`Upload ${scan.images} images into a Drive folder called "${scan.name}"?${shape}`)) return
+    await startDriveUpload(folder, ai.driveFlipkart)
+    say(`Uploading ${scan.images} images to Drive...`)
+    await refreshDrive()
+  } catch (error) {
+    say(error instanceof Error ? error.message : 'Could not start that upload.', true)
+  } finally {
+    ai.driveBusy = false
+    renderDrive()
+  }
 })
 
 el<HTMLInputElement>('#ai-reverse-folder').addEventListener('input', (event) => {
@@ -1808,6 +2709,9 @@ async function startAiRun() {
 /** Combos per request when sending a queue. */
 const QUEUE_BATCH = 150
 
+/** Set by the Stop button; checked between combos so a long build can be interrupted. */
+let queueCancelled = false
+
 /**
  * Builds the same batch as a run, but stops at the folder.
  *
@@ -1823,6 +2727,7 @@ async function sendToExtension() {
   if (!groups.length || !ai.angles.length) return
 
   ai.queueing = true
+  queueCancelled = false
   renderAiControls()
   const label = el('#ai-queue-text')
   let message: { text: string; error: boolean } | null = null
@@ -1866,15 +2771,21 @@ async function sendToExtension() {
       })),
     })
 
-    for (let start = 0; start < groups.length; start += QUEUE_BATCH) {
+    let stopped = false
+    for (let start = 0; start < groups.length && !stopped; start += QUEUE_BATCH) {
       const slice = groups.slice(start, start + QUEUE_BATCH)
       const images: { id: number; type: string; data: string }[] = []
       const combos: (RunRequest['combos'][number] & { prompts?: Record<string, string> })[] = []
 
       for (const [offset, group] of slice.entries()) {
+        if (queueCancelled) {
+          stopped = true
+          break
+        }
         const index = start + offset
         label.textContent = `Compositing ${index + 1} of ${groups.length}...`
-        // Yield so the label paints between combos on a long run.
+        // Yield so the label paints between combos on a long run, and so the
+        // Stop button's click actually gets a turn to run.
         await new Promise((resolve) => setTimeout(resolve, 0))
 
         const products = captionsFor(group)
@@ -1934,14 +2845,20 @@ async function sendToExtension() {
         read += templates.size
       }
 
+      if (stopped) break
+
       label.textContent = `Sending ${Math.min(start + QUEUE_BATCH, groups.length)} of ${groups.length}...`
       await appendQueue({ images, combos })
     }
 
-    label.textContent = 'Finishing...'
-    ai.queue = await finishQueue()
-    const readNote = read ? ` ${read} prompts written from the combo images.` : ''
-    message = { text: `${plural(ai.queue.items.length, 'image')} queued in ${ai.queue.directory}.${readNote} Open the extension on higgsfield.ai.`, error: false }
+    if (stopped) {
+      message = { text: 'Stopped — nothing was queued for the extension.', error: false }
+    } else {
+      label.textContent = 'Finishing...'
+      ai.queue = await finishQueue()
+      const readNote = read ? ` ${read} prompts written from the combo images.` : ''
+      message = { text: `${plural(ai.queue.items.length, 'image')} queued in ${ai.queue.directory}.${readNote} Open the extension on higgsfield.ai.`, error: false }
+    }
   } catch (error) {
     message = { text: error instanceof Error ? error.message : 'Could not build that queue.', error: true }
   } finally {
@@ -1954,8 +2871,12 @@ async function sendToExtension() {
 
 aiGenerateButton.addEventListener('click', startAiRun)
 el('#ai-queue-button').addEventListener('click', sendToExtension)
+el('#ai-queue-stop').addEventListener('click', () => {
+  queueCancelled = true
+  el('#ai-queue-text').textContent = 'Stopping...'
+})
 
-fetchConfig()
+if (!STATIC_HOST) fetchConfig()
   .then((config) => {
     ai.config = config
     // Fall to whatever this account can actually reach rather than leaving the
@@ -1975,13 +2896,17 @@ fetchConfig()
 
 refresh()
 
-void refreshTemplates()
+if (!STATIC_HOST) {
+  void refreshTemplates()
+  void refreshDrive()
+  void refreshCloudinary()
+}
 
 // The extension can put one image on a different surface, and can have a model
 // rewrite one prompt from its reference. Both need wording that lives here
 // rather than in the launcher, so it is offered on each load — which also
 // upgrades a queue that was built before either feature existed.
-void sendWording({
+if (!STATIC_HOST) void sendWording({
   backdrops: backdropMenu(),
   angles: ANGLES.map((angle) => ({ id: angle.id, camera: angle.camera })),
   templates: backdropTemplates(),

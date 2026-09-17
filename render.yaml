@@ -1,0 +1,16 @@
+# Review hosting charges in Render before creating this service.
+services:
+  - type: web
+    name: combo-maker-private
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: accounts
+      mountPath: /data
+      sizeGB: 1

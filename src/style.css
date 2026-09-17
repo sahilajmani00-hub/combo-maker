@@ -57,6 +57,8 @@ h1 em { color: var(--orange); font-style: italic; }
 .panel-heading > div { display: flex; gap: 14px; align-items: baseline; }
 h2 { font-size: 25px; font-weight: 500; letter-spacing: -.03em; }
 .count-label { color: var(--muted); font: 11px Arial, sans-serif; text-transform: uppercase; letter-spacing: .1em; white-space: nowrap; }
+.heading-actions { display: flex; align-items: baseline; gap: 14px; }
+.heading-actions .link-button:disabled { opacity: .4; cursor: not-allowed; text-decoration-color: transparent; }
 
 /* ---------- dropzone + product list ---------- */
 .dropzone { min-height: 185px; border: 1px dashed #adb7a7; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font: 13px Arial, sans-serif; transition: .2s ease; text-align: center; padding: 20px; }
@@ -78,10 +80,31 @@ input.product-name:focus { border-color: var(--orange); background: #fff; color:
 .recipe-meta strong { overflow-wrap: anywhere; }
 .product-set { flex: none; color: #9b9f95; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .row-actions { display: flex; gap: 2px; flex: none; }
-.icon-button { border: 1px solid transparent; background: transparent; color: #92988c; width: 26px; height: 26px; display: grid; place-items: center; font-size: 13px; line-height: 1; }
+.icon-button { border: 1px solid transparent; background: transparent; color: #92988c; width: 26px; height: 26px; display: grid; place-items: center; font-size: 13px; line-height: 1; text-decoration: none; }
 .icon-button:hover:not(:disabled) { border-color: var(--line); color: var(--ink); background: #fff; }
 .icon-button:disabled { opacity: .25; cursor: not-allowed; }
 .icon-button.remove-button { font-size: 20px; }
+.framing-button.framed { color: var(--orange); }
+.framing-button.open { border-color: var(--line); background: #fff; color: var(--ink); }
+
+.framing-panel { display: grid; gap: 14px; background: #fff; border: 1px solid var(--line); padding: 14px; }
+.framing-areas { display: flex; flex-wrap: wrap; gap: 10px; }
+.framing-area { border: 1px solid var(--line); background: transparent; padding: 6px; display: grid; gap: 6px; justify-items: center; }
+.framing-area.selected { border-color: var(--orange); background: #fff8f1; }
+.framing-shot { position: relative; display: block; width: 104px; background: #e9e7df; }
+.framing-canvas { display: block; width: 100%; height: auto; }
+/* Which cell of the combo this button is about. */
+.framing-spot { position: absolute; border: 2px solid var(--orange); box-shadow: 0 0 0 1px #fff inset; pointer-events: none; }
+.framing-area:not(.selected) .framing-spot { border-color: rgba(29, 36, 32, .45); }
+.framing-area-label { font: 10px Arial, sans-serif; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.framing-area.selected .framing-area-label { color: var(--ink); font-weight: 700; }
+.framing-area.framed .framing-area-label::after { content: ' •'; color: var(--orange); }
+.framing-controls { display: grid; gap: 8px; }
+.framing-slider { display: flex; align-items: center; gap: 10px; font: 11px Arial, sans-serif; color: var(--muted); }
+.framing-slider input[type="range"] { flex: 1; min-width: 0; accent-color: var(--orange); }
+.framing-label { flex: none; width: 66px; }
+.framing-foot { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.framing-foot .mode-copy { margin: 0; }
 
 /* ---------- recipe controls ---------- */
 .section-copy { color: var(--muted); font: 13px/1.5 Arial, sans-serif; margin: 4px 0 20px; }
@@ -111,6 +134,8 @@ input.product-name:focus { border-color: var(--orange); background: #fff; color:
 .slider-value { font: 11px Arial, sans-serif; color: var(--ink); min-width: 34px; text-align: right; }
 .toggle { display: flex; gap: 10px; align-items: start; font: 12px/1.4 Arial, sans-serif; color: var(--muted); padding: 7px 0; cursor: pointer; }
 .toggle input { accent-color: var(--orange); margin: 2px 0 0; flex: none; }
+.toggle:has(input:disabled) { opacity: .4; cursor: not-allowed; }
+.slider-row:has(input:disabled) { opacity: .4; }
 .toggle b { display: block; color: var(--ink); font-weight: 600; }
 .recipe-meta { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e5e4da; padding: 10px 0; font: 12px Arial, sans-serif; color: var(--muted); }
 .recipe-meta strong { color: var(--ink); font-weight: 600; text-align: right; }
@@ -185,6 +210,7 @@ textarea.text-input { resize: vertical; }
 .result-actions { display: flex; gap: 10px; flex: none; }
 .download-button { gap: 22px; padding: 13px 16px; }
 .download-button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.result-chips { align-items: center; margin-right: 6px; }
 .download-button span { font-size: 18px; }
 .result-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 18px; }
 .result-card { border: 1px solid var(--line); background: var(--paper); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
@@ -207,3 +233,19 @@ textarea.text-input { resize: vertical; }
   .result-heading { align-items: stretch; flex-direction: column; }
   footer { gap: 10px; flex-direction: column; }
 }
+
+/* Server integrations are available through the local launcher. */
+.static-host .server-feature,
+.static-host .mode-switch,
+.static-host #get-product-urls,
+.static-host #copy-all-urls,
+.static-host #canvas-layout-options,
+.static-host #canvas-sheet,
+.static-host #canvas-drive-upload,
+.static-host #canvas-drive-stop,
+.static-host #canvas-drive-copy { display: none !important; }
+.hosting-note { line-height: 1.6; margin: 0 0 24px; color: var(--muted); }
+.hosting-note a { color: inherit; text-decoration: underline; }
+
+.account-actions { display: flex; align-items: center; gap: 18px; }
+@media (max-width: 480px) { .account-actions .local-pill { display: none; } .heading-actions { flex-wrap: wrap; gap: 8px; } }

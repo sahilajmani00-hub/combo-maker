@@ -1,0 +1,30 @@
+# Hostinger VPS: run behind the server's existing HTTPS reverse proxy.
+name: combo-maker-private
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      APP_URL: ${APP_URL:?Set APP_URL to the dashboard HTTPS origin}
+      HOST: 0.0.0.0
+      PORT: 10000
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:4174:10000"
+    volumes:
+      - combo_accounts:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:10000/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  combo_accounts:
