@@ -87,16 +87,24 @@ input.product-name:focus { border-color: var(--orange); background: #fff; color:
 .framing-button.framed { color: var(--orange); }
 .framing-button.open { border-color: var(--line); background: #fff; color: var(--ink); }
 
-.framing-panel { display: flex; gap: 16px; align-items: start; background: #fff; border: 1px solid var(--line); padding: 14px; }
-.framing-preview { width: 148px; flex: none; background: #e9e7df; display: grid; place-items: center; min-height: 92px; }
-.framing-canvas { display: block; max-width: 100%; height: auto; }
-.framing-controls { flex: 1; min-width: 0; display: grid; gap: 8px; }
+.framing-panel { display: grid; gap: 14px; background: #fff; border: 1px solid var(--line); padding: 14px; }
+.framing-areas { display: flex; flex-wrap: wrap; gap: 10px; }
+.framing-area { border: 1px solid var(--line); background: transparent; padding: 6px; display: grid; gap: 6px; justify-items: center; }
+.framing-area.selected { border-color: var(--orange); background: #fff8f1; }
+.framing-shot { position: relative; display: block; width: 104px; background: #e9e7df; }
+.framing-canvas { display: block; width: 100%; height: auto; }
+/* Which cell of the combo this button is about. */
+.framing-spot { position: absolute; border: 2px solid var(--orange); box-shadow: 0 0 0 1px #fff inset; pointer-events: none; }
+.framing-area:not(.selected) .framing-spot { border-color: rgba(29, 36, 32, .45); }
+.framing-area-label { font: 10px Arial, sans-serif; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.framing-area.selected .framing-area-label { color: var(--ink); font-weight: 700; }
+.framing-area.framed .framing-area-label::after { content: ' •'; color: var(--orange); }
+.framing-controls { display: grid; gap: 8px; }
 .framing-slider { display: flex; align-items: center; gap: 10px; font: 11px Arial, sans-serif; color: var(--muted); }
 .framing-slider input[type="range"] { flex: 1; min-width: 0; accent-color: var(--orange); }
 .framing-label { flex: none; width: 66px; }
 .framing-foot { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
 .framing-foot .mode-copy { margin: 0; }
-@media (max-width: 520px) { .framing-panel { flex-direction: column; } .framing-preview { width: 100%; } }
 
 /* ---------- recipe controls ---------- */
 .section-copy { color: var(--muted); font: 13px/1.5 Arial, sans-serif; margin: 4px 0 20px; }

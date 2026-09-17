@@ -5,6 +5,7 @@ import {
   LAYOUTS,
   RATIOS,
   canvasToBlob,
+  comboCells,
   composeCombo,
   isFilled,
   isFramed,
@@ -17,6 +18,7 @@ import {
   type Framing,
   type LayoutId,
   type RatioId,
+  type Rect,
 } from './compose.ts'
 import { createZip, type ZipEntry } from './zip.ts'
 import { comboFolder, comboName } from './naming.ts'
@@ -88,7 +90,8 @@ import {
   type TemplateSummary,
 } from './ai.ts'
 
-type Product = { id: number; file: File; url: string; hostedUrl?: string; framing: Framing }
+/** `framing` is indexed by the area the photo lands in — see `framingSlots`. */
+type Product = { id: number; file: File; url: string; hostedUrl?: string; framing: Framing[] }
 type Result = {
   name: string
   blob: Blob
@@ -105,6 +108,19 @@ const STATIC_HOST = import.meta.env.VITE_STATIC_HOST === 'true'
 if (STATIC_HOST) document.documentElement.classList.add('static-host')
 
 const MAX_PRODUCTS = 60
+
+/** The largest combo, and so the number of areas a photo can be framed for. */
+const MAX_AREAS = 4
+
+/**
+ * One framing per area, since a photo is cropped by the shape of the cell it
+ * lands in and that changes from slot to slot.
+ */
+const framingSlots = (saved?: unknown): Framing[] =>
+  Array.from({ length: MAX_AREAS }, (_, area) => ({
+    ...DEFAULT_FRAMING,
+    ...(Array.isArray(saved) ? (saved[area] as Partial<Framing> | undefined) : undefined),
+  }))
 
 const BACKGROUNDS = [
   { id: '#ffffff', label: 'White' },
@@ -179,8 +195,9 @@ const ai = {
 }
 
 let tab: Tab = 'canvas'
-/** Product id whose framing panel is open, if any. */
+/** Product id whose framing panel is open, if any, and the area it is editing. */
 let framingOpen: number | null = null
+let framingArea = 0
 let results: Result[] = []
 let nextId = 1
 let busy = false
@@ -721,7 +738,7 @@ function renderProducts() {
               ${product.hostedUrl
                 ? `<button class="icon-button" data-copy-url="${product.id}" title="Copy image URL" aria-label="Copy image URL for ${escapeHtml(product.file.name)}">&#128279;</button>`
                 : ''}
-              <button class="icon-button framing-button${isFramed(product.framing) ? ' framed' : ''}${open ? ' open' : ''}" data-framing="${product.id}" aria-expanded="${open}" title="Adjust how this photo sits in every combo" aria-label="Adjust framing for ${escapeHtml(product.file.name)}">&#10530;</button>
+              <button class="icon-button framing-button${product.framing.some(isFramed) ? ' framed' : ''}${open ? ' open' : ''}" data-framing="${product.id}" aria-expanded="${open}" title="Adjust how this photo sits in each area of a combo" aria-label="Adjust framing for ${escapeHtml(product.file.name)}">&#10530;</button>
               <a class="icon-button" href="${product.url}" download="${escapeHtml(product.file.name)}" title="Download" aria-label="Download ${escapeHtml(product.file.name)}">&dArr;</a>
               <button class="icon-button" data-move="up" data-id="${product.id}" ${index === 0 ? 'disabled' : ''} aria-label="Move up">&uarr;</button>
               <button class="icon-button" data-move="down" data-id="${product.id}" ${index === state.products.length - 1 ? 'disabled' : ''} aria-label="Move down">&darr;</button>
@@ -746,9 +763,27 @@ const FRAMING_SLIDERS = [
   { key: 'y', label: 'Up / down', min: -100, max: 100, per: 100, unit: '%' },
 ] as const
 
+/** Areas are numbered but not all alike, so the shape is named where it helps. */
+function areaLabel(cell: Rect): string {
+  const ratio = cell.width / cell.height
+  if (Math.abs(ratio - 1) < 0.02) return 'square'
+  return ratio > 1 ? 'wide' : 'tall'
+}
+
 function framingPanel(product: Product): string {
+  const { width, height } = RATIOS[state.ratio]
+  const cells = comboCells(canvasOptions())
+  // Dropping to a smaller combo can strand the selection past the last area.
+  framingArea = Math.min(framingArea, cells.length - 1)
+  const area = framingArea
+  const areas = cells.map((cell, index) => `<button class="framing-area${index === area ? ' selected' : ''}${isFramed(product.framing[index]) ? ' framed' : ''}" data-framing-area="${index}" aria-pressed="${index === area}">
+      <span class="framing-shot" data-framing-preview="${index}">
+        <span class="framing-spot" style="left:${cell.x / width * 100}%;top:${cell.y / height * 100}%;width:${cell.width / width * 100}%;height:${cell.height / height * 100}%"></span>
+      </span>
+      <span class="framing-area-label">Area ${index + 1} · ${areaLabel(cell)}</span>
+    </button>`).join('')
   const sliders = FRAMING_SLIDERS.map((slider) => {
-    const value = Math.round(product.framing[slider.key] * slider.per)
+    const value = Math.round(product.framing[area][slider.key] * slider.per)
     return `<label class="framing-slider">
       <span class="framing-label">${slider.label}</span>
       <input type="range" min="${slider.min}" max="${slider.max}" step="1" value="${value}" data-framing-input="${slider.key}" data-id="${product.id}">
@@ -756,36 +791,58 @@ function framingPanel(product: Product): string {
     </label>`
   }).join('')
   return `<div class="framing-panel">
-    <div class="framing-preview" data-framing-preview="${product.id}"></div>
+    <div class="framing-areas">${areas}</div>
     <div class="framing-controls">
       ${sliders}
       <div class="framing-foot">
-        <p class="mode-copy">Every combo using this photo gets the same framing. Generate again to rebuild them.</p>
-        <button class="chip" data-framing-reset="${product.id}">Reset</button>
+        <p class="mode-copy">Each area is framed on its own, and every combo that puts this photo there follows. Generate again to rebuild them.</p>
+        <button class="chip" data-framing-reset="${product.id}">Reset area</button>
       </div>
     </div>
   </div>`
 }
 
 /**
- * The first combo this photo lands in, composed exactly as the real run would.
+ * A real combo with this photo moved into the area being previewed.
+ *
+ * Across a run the same photo lands in every slot in turn, so standing it in
+ * one deliberately is not a fiction — it is the combo the person will get.
+ */
+function previewGroup(product: Product, area: number): Product[] {
+  const found = comboGroups().find((items) => items.some((item) => item.id === product.id))
+  const pool = found ?? state.products.slice(0, state.comboSize)
+  const group = [...pool]
+  if (!group.length) return [product]
+  while (group.length < state.comboSize) group.push(pool[group.length % pool.length])
+  const from = group.indexOf(product)
+  if (from === -1) group[area] = product
+  else [group[area], group[from]] = [group[from], group[area]]
+  return group
+}
+
+/**
+ * Composes each area's thumbnail, or just one while a slider is being dragged.
  *
  * Framing is a property of the photo rather than of one combo, so showing it
- * inside a genuine combo is the only preview that answers the question being
+ * inside genuine combos is the only preview that answers the question being
  * asked — what this change does to all of them.
  */
 let framingPreviewToken = 0
-async function renderFramingPreview(product: Product) {
+async function renderFramingPreview(product: Product, only?: number) {
   const token = ++framingPreviewToken
-  const box = productList.querySelector<HTMLDivElement>(`[data-framing-preview="${product.id}"]`)
-  if (!box) return
-  const group = comboGroups().find((items) => items.some((item) => item.id === product.id)) ?? [product]
-  const canvas = composeCombo(await framedImages(group), canvasOptions())
-  // Decoding is async, so the panel may have closed or been overtaken by a
-  // later drag by the time the photos are ready.
-  if (token !== framingPreviewToken || !box.isConnected) return
-  canvas.className = 'framing-canvas'
-  box.replaceChildren(canvas)
+  const options = canvasOptions()
+  for (const [area] of comboCells(options).entries()) {
+    if (only !== undefined && only !== area) continue
+    const shot = productList.querySelector<HTMLElement>(`[data-framing-preview="${area}"]`)
+    if (!shot) continue
+    const canvas = composeCombo(await framedImages(previewGroup(product, area)), options)
+    // Decoding is async, so the panel may have closed or been overtaken by a
+    // later drag by the time the photos are ready.
+    if (token !== framingPreviewToken || !shot.isConnected) return
+    canvas.className = 'framing-canvas'
+    shot.querySelector('canvas')?.remove()
+    shot.prepend(canvas)
+  }
 }
 
 function renderResults() {
@@ -863,10 +920,10 @@ function applySettings(settings: Record<string, unknown>) {
   ai.perCombo = Boolean(saved.perCombo)
   ai.writtenPrompts = (saved.writtenPrompts as Record<string, string>) ?? {}
   ai.captions = {}
-  const framing = Array.isArray(settings.framing) ? (settings.framing as Partial<Framing>[]) : []
+  const framing = Array.isArray(settings.framing) ? settings.framing : []
   state.products.forEach((product, index) => {
     if (captions[index]) ai.captions[product.id] = captions[index]
-    product.framing = { ...DEFAULT_FRAMING, ...framing[index] }
+    product.framing = framingSlots(framing[index])
   })
 
   // The controls read their values from state on render, except the free-text
@@ -928,7 +985,7 @@ function addFiles(files: FileList | File[]) {
   const accepted = incoming.slice(0, Math.max(0, room))
   state.products = [
     ...state.products,
-    ...accepted.map((file) => ({ id: nextId++, file, url: URL.createObjectURL(file), framing: { ...DEFAULT_FRAMING } })),
+    ...accepted.map((file) => ({ id: nextId++, file, url: URL.createObjectURL(file), framing: framingSlots() })),
   ]
   refresh()
   if (incoming.length > accepted.length) {
@@ -1017,13 +1074,23 @@ productList.addEventListener('input', (event) => {
   if (!slider) return
   const product = state.products.find((item) => item.id === Number(input.dataset.id))
   if (!product) return
-  product.framing = { ...product.framing, [slider.key]: Number(input.value) / slider.per }
+  const area = framingArea
+  product.framing[area] = { ...product.framing[area], [slider.key]: Number(input.value) / slider.per }
   // Redrawing the whole list mid-drag would tear the slider out from under the
-  // pointer, so the pieces that changed are updated in place.
+  // pointer, so the pieces that changed are updated in place — and only this
+  // area's thumbnail, since recomposing all of them on every step would lag.
   const readout = input.parentElement?.querySelector(`[data-framing-value="${slider.key}"]`)
   if (readout) readout.textContent = `${input.value}${slider.unit}`
-  productList.querySelector(`[data-framing="${product.id}"]`)?.classList.toggle('framed', isFramed(product.framing))
-  void renderFramingPreview(product)
+  productList.querySelector(`[data-framing="${product.id}"]`)?.classList.toggle('framed', product.framing.some(isFramed))
+  productList.querySelector(`[data-framing-area="${area}"]`)?.classList.toggle('framed', isFramed(product.framing[area]))
+  void renderFramingPreview(product, area)
+})
+
+// The other areas share the photo, so they catch up once the drag ends.
+productList.addEventListener('change', (event) => {
+  if (!(event.target as HTMLElement).dataset.framingInput) return
+  const product = state.products.find((item) => item.id === framingOpen)
+  if (product) void renderFramingPreview(product)
 })
 
 productList.addEventListener('click', (event) => {
@@ -1038,15 +1105,19 @@ productList.addEventListener('click', (event) => {
     if (product?.hostedUrl) void copyText(product.hostedUrl, 'Image URL copied.')
     return
   }
+  const pick = target.closest<HTMLButtonElement>('[data-framing-area]')
+  if (pick) {
+    framingArea = Number(pick.dataset.framingArea)
+    renderProducts()
+    return
+  }
   const adjust = target.closest<HTMLButtonElement>('[data-framing]')
   if (adjust) {
     const id = Number(adjust.dataset.framing)
     framingOpen = framingOpen === id ? null : id
     renderProducts()
     if (framingOpen !== null) {
-      productList.querySelector(`[data-framing-preview="${framingOpen}"]`)
-        ?.closest('.framing-panel')
-        ?.scrollIntoView({ block: 'nearest' })
+      productList.querySelector('.framing-panel')?.scrollIntoView({ block: 'nearest' })
     }
     return
   }
@@ -1054,7 +1125,7 @@ productList.addEventListener('click', (event) => {
   if (reset) {
     const product = state.products.find((item) => item.id === Number(reset.dataset.framingReset))
     if (!product) return
-    product.framing = { ...DEFAULT_FRAMING }
+    product.framing[framingArea] = { ...DEFAULT_FRAMING }
     renderProducts()
   }
 })
@@ -1143,7 +1214,7 @@ el('#template-list').addEventListener('click', async (event) => {
     state.products = template.products.map((product) => {
       const bytes = Uint8Array.from(atob(product.data), (char) => char.charCodeAt(0))
       const file = new File([bytes], product.name, { type: product.type })
-      return { id: nextId++, file, url: URL.createObjectURL(file), framing: { ...DEFAULT_FRAMING } }
+      return { id: nextId++, file, url: URL.createObjectURL(file), framing: framingSlots() }
     })
     applySettings(template.settings)
     el<HTMLInputElement>('#template-name').value = template.name
@@ -1231,9 +1302,9 @@ function canvasOptions(): ComposeOptions {
   }
 }
 
-/** Each photo in a combo, carrying the framing it keeps across every combo. */
+/** Each photo in a combo, framed for the area it happens to land in. */
 function framedImages(group: Product[]): Promise<ComposeImage[]> {
-  return Promise.all(group.map(async (product) => ({ ...(await preparedFor(product)), framing: product.framing })))
+  return Promise.all(group.map(async (product, area) => ({ ...(await preparedFor(product)), framing: product.framing[area] })))
 }
 
 /**

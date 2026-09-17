@@ -216,6 +216,22 @@ export function cellRects(size: ComboSize, layout: LayoutId, area: Rect, gap: nu
   return rects
 }
 
+/**
+ * The areas one combo is divided into, in frame order, at output pixel size.
+ *
+ * The shapes differ from slot to slot — a filled three-up is one tall cell
+ * beside two squares — so the same photo needs different framing depending on
+ * where it lands.
+ */
+export function comboCells(options: ComposeOptions): Rect[] {
+  const { width, height } = RATIOS[options.ratio]
+  const filled = isFilled(options.layout)
+  const padding = filled ? 0 : width * options.padding
+  const gap = filled ? 0 : width * options.gap
+  const area: Rect = { x: padding, y: padding, width: width - padding * 2, height: height - padding * 2 }
+  return cellRects(options.size, options.layout, area, gap)
+}
+
 export function composeCombo(images: ComposeImage[], options: ComposeOptions): HTMLCanvasElement {
   const { width, height } = RATIOS[options.ratio]
   const canvas = document.createElement('canvas')
@@ -233,15 +249,7 @@ export function composeCombo(images: ComposeImage[], options: ComposeOptions): H
   }
 
   const filled = isFilled(options.layout)
-  const padding = filled ? 0 : width * options.padding
-  const gap = filled ? 0 : width * options.gap
-  const area: Rect = {
-    x: padding,
-    y: padding,
-    width: width - padding * 2,
-    height: height - padding * 2,
-  }
-  const cells = cellRects(options.size, options.layout, area, gap)
+  const cells = comboCells(options)
 
   if (filled) {
     // Cover, not contain: scale by the larger ratio so the cell is completely
