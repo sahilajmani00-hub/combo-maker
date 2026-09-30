@@ -37,3 +37,9 @@ dist-ssr
 
 # Nested clone of the earlier imagecombomaker repo — not part of this project
 /imagecombomaker/
+
+# Other projects that live under this folder in Downloads but are their own
+# git repos with their own GitHub remotes — not part of combo-maker.
+/Eloria-Website/
+/cost-sheet-pricing-system/
+/nexterhood/
