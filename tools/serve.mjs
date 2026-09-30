@@ -800,7 +800,7 @@ server.on('listening', () => {
   console.log('   Keep this window open while you work.')
   console.log('   Close it (or press Ctrl+C) to stop.')
   console.log('  ------------------------------------------------\n')
-  openExternal(url)
+  if (!process.env.NO_OPEN) openExternal(url)
 })
 
 /** Walk upward from a preferred port until one is free. */
