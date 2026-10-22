@@ -42,7 +42,7 @@ h1 em { color: var(--orange); font-style: italic; }
 .intro-note span, .step { color: var(--orange); font: 700 11px Arial, sans-serif; }
 
 /* ---------- section switch ---------- */
-.mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+.mode-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 20px; }
 .mode-tab { border: 1px solid var(--line); background: transparent; text-align: left; padding: 15px 17px; display: flex; flex-direction: column; gap: 5px; color: var(--muted); }
 .mode-tab b { font: 600 14px Arial, sans-serif; color: var(--ink); }
 .mode-tab span { font: 11px/1.45 Arial, sans-serif; }
@@ -213,6 +213,7 @@ textarea.text-input { resize: vertical; }
 .result-chips { align-items: center; margin-right: 6px; }
 .download-button span { font-size: 18px; }
 .result-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 18px; }
+#lot-select { display: block; width: 100%; margin-top: 8px; border: 1px solid var(--line); background: var(--paper); padding: 10px 12px; font: 12px Arial, sans-serif; }
 .result-card { border: 1px solid var(--line); background: var(--paper); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .result-frame { background: #e9e7df; display: grid; place-items: center; padding: 10px; }
 .result-frame img { display: block; max-width: 100%; height: auto; }

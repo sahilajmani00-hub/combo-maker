@@ -260,7 +260,8 @@ export const reversePrompts = (payload: { model: string; folder: string; limit?:
   )
 
 export type DriveRun = {
-  status: 'running' | 'finished' | 'cancelled' | 'failed'
+  id?: string
+  status: 'running' | 'paused' | 'finished' | 'cancelled' | 'failed'
   folder: string
   total: number
   done: number
@@ -270,6 +271,8 @@ export type DriveRun = {
   error: string | null
   hosted?: number
   hostError?: string | null
+  layout?: string
+  manifest?: { sku: string; images: { name: string; url: string; hosted?: string | null }[] }[]
 } | null
 
 export type DriveStatus = {
@@ -280,6 +283,23 @@ export type DriveStatus = {
 }
 
 export const driveStatus = () => request<DriveStatus>('/api/drive')
+
+export type UploadTask = {
+  id: string
+  folder: string
+  status: string
+  total: number
+  done: number
+  failed: number
+  records: number
+  layout?: string
+  savedAt: string
+  current: boolean
+}
+
+export const listUploadTasks = () => request<{ tasks: UploadTask[] }>('/api/drive/tasks')
+export const resetUploadTask = (id: string) =>
+  request<{ tasks: UploadTask[] }>('/api/drive/tasks/reset', postJson({ id }))
 
 export const saveDriveClient = (clientId: string, clientSecret: string) =>
   request<{ authUrl: string }>('/api/drive/client', postJson({ clientId, clientSecret }))
@@ -309,6 +329,11 @@ export type DriveGroup = { sku: string; files: { name: string; type: string; dat
  */
 export const startDriveImages = (folderName: string, layout: string) =>
   request<{ started: boolean; folder: string; link: string | null }>('/api/drive/images/start', postJson({ folderName, layout }))
+
+export const pauseDriveImages = () => request<{ run: DriveRun }>('/api/drive/images/pause', postJson({}))
+
+export const resumeDriveImages = (layout: string, groups: { sku: string; count: number }[]) =>
+  request<{ run: DriveRun; completed: string[] }>('/api/drive/images/resume', postJson({ layout, groups }))
 
 export const sendDriveImages = (groups: DriveGroup[]) =>
   request<{ done: number; failed: number }>('/api/drive/images/batch', postJson({ groups }))
@@ -348,6 +373,59 @@ export type HostedProduct = { name: string; url?: string; error?: string }
  */
 export const uploadProductImages = (folder: string, files: { name: string; type: string; data: string }[]) =>
   request<{ results: HostedProduct[] }>('/api/cloudinary/products', postJson({ folder, files }))
+
+export type R2Status = {
+  configured: boolean
+  accountId: string
+  bucket: string
+  publicUrl: string
+  accessKeyHint?: string
+}
+
+export const r2Status = () => request<R2Status>('/api/r2')
+
+export const saveR2 = (settings: {
+  accountId: string
+  bucket: string
+  accessKeyId: string
+  secretAccessKey: string
+  publicUrl: string
+}) => request<R2Status>('/api/r2', postJson(settings))
+
+export const disconnectR2 = () => request<R2Status>('/api/r2/disconnect', postJson({}))
+
+export const uploadProductImagesToR2 = (folder: string, files: { name: string; type: string; data: string }[]) =>
+  request<{ results: HostedProduct[] }>('/api/r2/products', postJson({ folder, files }))
+
+export const uploadZipToR2 = (file: File) =>
+  request<{ id: string; name: string; total: number }>('/api/r2/archive', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/zip', 'X-File-Name': encodeURIComponent(file.name) },
+    body: file,
+  })
+
+export type R2ZipImport = {
+  id: string
+  name: string
+  status: 'running' | 'finished' | 'failed'
+  total: number
+  done: number
+  failed: number
+  error: string | null
+  results?: { name: string; url?: string; error?: string }[]
+}
+
+export const r2ZipImportStatus = (id: string) => request<R2ZipImport>(`/api/r2/archive/${encodeURIComponent(id)}`)
+
+export const sceneStatus = () => request<{ configured: boolean }>('/api/scene/config')
+export const saveSceneKey = (key: string) => request<{ configured: boolean }>('/api/scene/config', postJson({ key }))
+export const disconnectScene = () => request<{ configured: boolean }>('/api/scene/disconnect', postJson({}))
+export const generateScene = (input: {
+  model: string
+  background: string
+  extra: string
+  images: { type: string; data: string }[]
+}) => request<{ type: string; data: string; model: string }>('/api/scene/generate', postJson(input))
 
 export const LISTING_SHEET_URL = '/api/drive/sheet.xlsx'
 

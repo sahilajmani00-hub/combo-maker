@@ -71,12 +71,12 @@ export function countGroups(poolSize: number, size: number, mode: GroupMode): nu
  * business, not this function's. `limit` is still there for anyone who wants
  * one — the browser passes none.
  */
-export function buildGroups<T>(items: T[], size: number, mode: GroupMode, limit = Infinity): T[][] {
+export function buildGroups<T>(items: T[], size: number, mode: GroupMode, limit = Infinity, offset = 0): T[][] {
   if (size <= 0 || items.length < minimumImages(size, mode)) return []
 
   if (mode === 'sequential') {
     const groups: T[][] = []
-    for (let index = 0; index + size <= items.length; index += size) {
+    for (let index = offset * size; index + size <= items.length && groups.length < limit; index += size) {
       groups.push(items.slice(index, index + size))
     }
     return groups
@@ -86,7 +86,9 @@ export function buildGroups<T>(items: T[], size: number, mode: GroupMode, limit 
   const sets = mode === 'repeats'
     ? multisetIndices(items.length, size)
     : combinationIndices(items.length, size)
+  let skipped = 0
   for (const indices of sets) {
+    if (skipped++ < offset) continue
     // The generator reuses its index array, so copy before mapping out.
     groups.push(indices.map((index) => items[index]))
     if (groups.length >= limit) break

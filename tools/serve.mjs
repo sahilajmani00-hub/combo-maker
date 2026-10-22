@@ -15,8 +15,11 @@
  */
 
 import { createServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, closeSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { basename, extname, join, normalize, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +30,9 @@ import * as queue from './queue.mjs'
 import * as templates from './templates.mjs'
 import * as drive from './drive.mjs'
 import * as cloudinary from './cloudinary.mjs'
+import * as cloudflareR2 from './cloudflare-r2.mjs'
+import * as openaiScene from './openai-scene.mjs'
+import { listImages, extractImage } from './zip-images.mjs'
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const dist = join(root, 'dist')
@@ -308,14 +314,23 @@ let driveRun = null
  * hundred uploads are too expensive to repeat over a process exit.
  */
 const RUN_FILE = join(root, '.last-drive-run.json')
+const RUN_HISTORY = join(root, 'data', 'upload-runs')
+const resetRunIds = new Set()
+
+function runPath(id) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id) ? join(RUN_HISTORY, `${id}.json`) : null
+}
 
 function saveRun(run) {
-  if (!run?.manifest?.length) return
+  if (!run || (run.id && resetRunIds.has(run.id))) return
   try {
+    run.id ||= randomUUID()
     // Explicit field list rather than the whole object: it is the reason no
     // credential can ever reach this file by accident.
-    const { status, folder, total, done, skipped, failed, link, error, hosted, hostError, layout, rootId, manifest } = run
-    const saved = { status, folder, total, done, skipped, failed, link, error, hosted, hostError, layout, rootId, manifest, savedAt: new Date().toISOString() }
+    const { id, status, folder, total, done, skipped, failed, link, error, hosted, hostError, layout, rootId, manifest } = run
+    const saved = { id, status, folder, total, done, skipped, failed, link, error, hosted, hostError, layout, rootId, manifest: manifest ?? [], savedAt: new Date().toISOString() }
+    mkdirSync(RUN_HISTORY, { recursive: true })
+    writeFileSync(runPath(id), `${JSON.stringify(saved, null, 2)}\n`, 'utf8')
     writeFileSync(RUN_FILE, `${JSON.stringify(saved, null, 2)}\n`, 'utf8')
   } catch {
     // Losing the cache is not worth failing an upload over.
@@ -327,9 +342,10 @@ function loadRun() {
     if (!existsSync(RUN_FILE)) return null
     const run = JSON.parse(readFileSync(RUN_FILE, 'utf8'))
     if (!run?.manifest?.length) return null
-    // Nothing can still be running: the process that was running it is gone.
-    // Left as "running" it would block the next upload and poll forever.
-    if (run.status === 'running') run.status = 'finished'
+    // A canvas upload can be continued after regenerating the same lot.
+    // A background folder upload has no browser batches to resume.
+    if (run.status === 'running') run.status = run.layout ? 'paused' : 'finished'
+    if (!run.id || !existsSync(runPath(run.id))) saveRun(run)
     return run
   } catch {
     return null
@@ -337,6 +353,29 @@ function loadRun() {
 }
 
 driveRun = loadRun()
+
+function listUploadTasks() {
+  const runs = !existsSync(RUN_HISTORY) ? [] : readdirSync(RUN_HISTORY).filter((name) => name.endsWith('.json')).flatMap((name) => {
+    try {
+      const run = JSON.parse(readFileSync(join(RUN_HISTORY, name), 'utf8'))
+      if (!runPath(run.id) || `${run.id}.json` !== name) return []
+      return [{ id: run.id, folder: run.folder, status: run.status, total: run.total,
+        done: run.done, failed: run.failed, layout: run.layout, savedAt: run.savedAt,
+        records: run.manifest?.length ?? 0, current: run.id === driveRun?.id }]
+    } catch { return [] }
+  })
+  const imports = !existsSync(r2ZipHistory) ? [] : readdirSync(r2ZipHistory).filter((name) => name.endsWith('.json')).flatMap((name) => {
+    try {
+      const path = join(r2ZipHistory, name)
+      const job = JSON.parse(readFileSync(path, 'utf8'))
+      if (!runPath(job.id) || `${job.id}.json` !== name) return []
+      return [{ id: `zip:${job.id}`, folder: `R2 ZIP: ${job.name}`, status: job.status === 'running' && !r2ZipJobs.has(job.id) ? 'failed' : job.status,
+        total: job.total, done: job.done, failed: job.failed, records: job.results?.length ?? 0,
+        savedAt: statSync(path).mtime.toISOString(), current: false }]
+    } catch { return [] }
+  })
+  return [...runs, ...imports].sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)))
+}
 
 /**
  * Mirrors one image to Cloudinary so the spreadsheet has a durable URL.
@@ -358,6 +397,14 @@ driveRun = loadRun()
  * that straight to the page, and a Map would land there as an empty object.
  */
 const claimedFolders = new WeakMap()
+
+/** Prefer R2 when configured; otherwise keep using the existing Cloudinary host. */
+function readImageHost() {
+  const r2 = cloudflareR2.readCredentials(root)
+  if (r2) return { provider: 'r2', credentials: r2 }
+  const cloud = cloudinary.readCredentials(root)
+  return cloud ? { provider: 'cloudinary', credentials: cloud } : null
+}
 
 /**
  * The Cloudinary folder for one SKU, guaranteed unique within its run.
@@ -404,7 +451,16 @@ async function mirror(run, credentials, options) {
 
 async function hostImage(credentials, { folder, name, data, file, type }) {
   if (!credentials) return null
-  const uploaded = await cloudinary.uploadImage(credentials, {
+  if (credentials.provider === 'r2') {
+    const uploaded = await cloudflareR2.uploadImage(credentials.credentials, {
+      data: data ?? readFileSync(file).toString('base64'),
+      type,
+      folder: `combo-maker/${folder}`,
+      fileName: name,
+    })
+    return uploaded.url
+  }
+  const uploaded = await cloudinary.uploadImage(credentials.credentials, {
     data,
     file,
     type,
@@ -428,7 +484,7 @@ async function runFlipkartUpload(token, rootName, images) {
   const myRun = (driveRun = { status: 'running', folder: rootName, total, done: 0, skipped: 0, failed: 0, link: null, error: null })
   myRun.manifest = []
   // Read once per run, not per image: the credentials live in a file.
-  const host = cloudinary.readCredentials(root)
+  const host = readImageHost()
   myRun.hosted = 0
   myRun.hostError = null
 
@@ -597,7 +653,7 @@ async function uploadDriveImageBatch(credentials, groups) {
   const token = myRun.useDrive ? await drive.accessToken(credentials) : null
   // Deliberately not cached on the run: /api/drive serialises that object
   // straight to the page, and the API secret has no business going there.
-  const host = cloudinary.readCredentials(root)
+  const host = readImageHost()
   const staging = mkdtempSync(join(tmpdir(), 'combo-maker-drive-'))
 
   try {
@@ -779,6 +835,255 @@ async function handleCloudinary(request, response, pathname, method) {
   }
 }
 
+const r2ZipJobs = new Map()
+const r2ZipHistory = join(root, 'data', 'r2-imports')
+
+function saveR2ZipJob(job) {
+  try {
+    mkdirSync(r2ZipHistory, { recursive: true })
+    writeFileSync(join(r2ZipHistory, `${job.id}.json`), JSON.stringify({
+      id: job.id, name: job.name, status: job.status, total: job.total,
+      done: job.done, failed: job.failed, error: job.error, results: job.results,
+    }))
+  } catch (error) {
+    console.error('Could not save R2 ZIP import progress:', error)
+  }
+}
+
+async function runR2ZipImport(job, credentials, zipPath, directory) {
+  try {
+    const folder = `combo-maker/imports/${Date.now()}-${cloudflareR2.safeSegment(job.name.replace(/\.zip$/i, ''))}`
+    for (const [index, entry] of job.entries.entries()) {
+      const imagePath = join(directory, `image-${index}`)
+      const original = basename(entry.name)
+      const dot = original.lastIndexOf('.')
+      const stem = dot > 0 ? original.slice(0, dot) : original
+      const extension = dot > 0 ? original.slice(dot).toLowerCase() : ''
+      const fileName = `${String(index + 1).padStart(5, '0')}-${cloudflareR2.safeSegment(stem)}${extension}`
+      try {
+        await extractImage(zipPath, entry, imagePath)
+        const uploaded = await cloudflareR2.uploadFile(credentials, {
+          path: imagePath, fileName, folder,
+          type: extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg',
+        })
+        job.results.push({ name: entry.name, url: uploaded.url })
+        job.done++
+      } catch (error) {
+        job.results.push({ name: entry.name, error: error.message })
+        job.failed++
+      } finally {
+        rmSync(imagePath, { force: true })
+      }
+      if ((index + 1) % 25 === 0) saveR2ZipJob(job)
+    }
+    job.status = 'finished'
+  } catch (error) {
+    job.status = 'failed'
+    job.error = error.message
+  } finally {
+    saveR2ZipJob(job)
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
+/** Cloudflare R2 credentials and durable image URLs. */
+async function handleR2(request, response, pathname, method) {
+  try {
+    const archiveStatus = /^\/api\/r2\/archive\/([0-9a-f-]+)$/.exec(pathname)
+    if (archiveStatus && method === 'GET') {
+      let job = r2ZipJobs.get(archiveStatus[1])
+      if (!job) {
+        const saved = join(r2ZipHistory, `${archiveStatus[1]}.json`)
+        if (existsSync(saved)) {
+          job = JSON.parse(readFileSync(saved, 'utf8'))
+          if (job.status === 'running') job = { ...job, status: 'failed', error: 'The launcher stopped before this import finished.' }
+        }
+      }
+      if (!job) sendJson(response, 404, { error: 'That ZIP import is no longer tracked.' })
+      else sendJson(response, 200, {
+        id: job.id, name: job.name, status: job.status, total: job.total,
+        done: job.done, failed: job.failed, error: job.error,
+        results: job.status === 'finished' || job.status === 'failed' ? job.results : undefined,
+      })
+      return true
+    }
+    if (pathname === '/api/r2/archive' && method === 'POST') {
+      const origin = request.headers.origin
+      if (request.headers['sec-fetch-site'] === 'cross-site' || (origin && new URL(origin).host !== request.headers.host)) {
+        sendJson(response, 403, { error: 'Choose the ZIP from the local Combo Maker page.' })
+        return true
+      }
+      const credentials = cloudflareR2.readCredentials(root)
+      if (!credentials) {
+        sendJson(response, 400, { error: 'Connect Cloudflare R2 first.' })
+        return true
+      }
+      const name = decodeURIComponent(String(request.headers['x-file-name'] ?? ''))
+      if (!name || basename(name) !== name || !/\.zip$/i.test(name)) {
+        sendJson(response, 400, { error: 'Choose a .zip file.' })
+        return true
+      }
+      const maxBytes = 2 * 1024 * 1024 * 1024
+      if (Number(request.headers['content-length'] ?? 0) > maxBytes) {
+        sendJson(response, 413, { error: 'ZIP files must be 2 GB or smaller.' })
+        return true
+      }
+      const directory = mkdtempSync(join(tmpdir(), 'combo-r2-'))
+      const path = join(directory, 'archive.zip')
+      try {
+        let bytes = 0
+        const limiter = new Transform({
+          transform(chunk, _encoding, callback) {
+            bytes += chunk.length
+            callback(bytes > maxBytes ? new Error('ZIP files must be 2 GB or smaller.') : null, chunk)
+          },
+        })
+        await pipeline(request, limiter, createWriteStream(path))
+        const header = Buffer.alloc(4)
+        const fd = openSync(path, 'r')
+        try { readSync(fd, header, 0, 4, 0) } finally { closeSync(fd) }
+        if (!header.equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
+          sendJson(response, 400, { error: 'That file is not a valid ZIP archive.' })
+          return true
+        }
+        let entries
+        try { entries = listImages(path) } catch (error) { error.expected = true; throw error }
+        const job = { id: randomUUID(), name, status: 'running', entries, total: entries.length, done: 0, failed: 0, results: [], error: null }
+        r2ZipJobs.set(job.id, job)
+        saveR2ZipJob(job)
+        runR2ZipImport(job, credentials, path, directory)
+        sendJson(response, 200, { id: job.id, name, total: entries.length })
+        return true
+      } catch (error) {
+        rmSync(directory, { recursive: true, force: true })
+        throw error
+      }
+    }
+
+    if (pathname === '/api/r2' && method === 'GET') {
+      const credentials = cloudflareR2.readCredentials(root)
+      sendJson(response, 200, {
+        configured: Boolean(credentials),
+        accountId: credentials?.accountId ?? '',
+        bucket: credentials?.bucket ?? '',
+        publicUrl: credentials?.publicUrl ?? '',
+        accessKeyHint: credentials ? `…${credentials.accessKeyId.slice(-4)}` : '',
+      })
+      return true
+    }
+
+    if (pathname === '/api/r2' && method === 'POST') {
+      const credentials = cloudflareR2.validateCredentials(await readJson(request))
+      cloudflareR2.writeCredentials(root, credentials)
+      sendJson(response, 200, {
+        configured: true,
+        accountId: credentials.accountId,
+        bucket: credentials.bucket,
+        publicUrl: credentials.publicUrl,
+        accessKeyHint: `…${credentials.accessKeyId.slice(-4)}`,
+      })
+      return true
+    }
+
+    if (pathname === '/api/r2/disconnect' && method === 'POST') {
+      cloudflareR2.writeCredentials(root, {})
+      sendJson(response, 200, { configured: false, accountId: '', bucket: '', publicUrl: '' })
+      return true
+    }
+
+    if (pathname === '/api/r2/products' && method === 'POST') {
+      const credentials = cloudflareR2.readCredentials(root)
+      if (!credentials) {
+        sendJson(response, 400, { error: 'Connect Cloudflare R2 first — its settings are under Add products.' })
+        return true
+      }
+      const body = await readJson(request)
+      const files = Array.isArray(body.files) ? body.files : []
+      if (!files.length) {
+        sendJson(response, 400, { error: 'No images to upload.' })
+        return true
+      }
+      const folder = `combo-maker/products/${cloudflareR2.safeFolder(String(body.folder ?? 'uploads')) || 'uploads'}`
+      const used = new Set()
+      const results = []
+      for (const file of files) {
+        const name = String(file?.name ?? 'image')
+        const dot = name.lastIndexOf('.')
+        const stem = dot > 0 ? name.slice(0, dot) : name
+        const extension = dot > 0 ? name.slice(dot) : ''
+        let safeName = `${cloudflareR2.safeSegment(stem)}${extension.replace(/[^a-zA-Z0-9.]/g, '')}`
+        let suffix = 2
+        while (used.has(safeName.toLowerCase())) safeName = `${cloudflareR2.safeSegment(stem)}-${suffix++}${extension.replace(/[^a-zA-Z0-9.]/g, '')}`
+        used.add(safeName.toLowerCase())
+        try {
+          const uploaded = await cloudflareR2.uploadImage(credentials, {
+            data: String(file?.data ?? ''),
+            type: String(file?.type ?? ''),
+            folder,
+            fileName: safeName,
+          })
+          results.push({ name, url: uploaded.url })
+        } catch (error) {
+          results.push({ name, error: error.message })
+        }
+      }
+      sendJson(response, 200, { results })
+      return true
+    }
+
+    return false
+  } catch (error) {
+    sendJson(response, error.expected ? 400 : 500, { error: error.message })
+    return true
+  }
+}
+
+/** OpenAI scene composition keeps the API key on the local launcher. */
+async function handleScene(request, response, pathname, method) {
+  try {
+    // A remote web page must not be able to use the local paid image endpoint.
+    const origin = request.headers.origin ? new URL(request.headers.origin) : null
+    if (method === 'POST' && (request.headers['sec-fetch-site'] === 'cross-site' ||
+      (origin && (!['localhost', '127.0.0.1'].includes(origin.hostname) || origin.protocol !== 'http:')))) {
+      sendJson(response, 403, { error: 'OpenAI scenes can only be generated from this local app.' })
+      return true
+    }
+    if (pathname === '/api/scene/config' && method === 'GET') {
+      sendJson(response, 200, { configured: Boolean(openaiScene.readKey(root)) })
+      return true
+    }
+    if (pathname === '/api/scene/config' && method === 'POST') {
+      const key = String((await readJson(request)).key ?? '').trim()
+      if (!key) {
+        sendJson(response, 400, { error: 'Enter an OpenAI API key.' })
+        return true
+      }
+      openaiScene.writeKey(root, key)
+      sendJson(response, 200, { configured: true })
+      return true
+    }
+    if (pathname === '/api/scene/disconnect' && method === 'POST') {
+      openaiScene.writeKey(root, '')
+      sendJson(response, 200, { configured: false })
+      return true
+    }
+    if (pathname === '/api/scene/generate' && method === 'POST') {
+      const key = openaiScene.readKey(root)
+      if (!key) {
+        sendJson(response, 400, { error: 'Connect an OpenAI API key first.' })
+        return true
+      }
+      const generated = await openaiScene.generateScene(key, await readJson(request))
+      sendJson(response, 200, generated)
+      return true
+    }
+    return false
+  } catch (error) {
+    sendJson(response, 502, { error: error.message })
+    return true
+  }
+}
+
 /** Google Drive: connect once, then mirror a folder of images into it. */
 async function handleDrive(request, response, pathname, method) {
   try {
@@ -790,6 +1095,53 @@ async function handleDrive(request, response, pathname, method) {
         redirectUri: redirectUri(),
         run: driveRun,
       })
+      return true
+    }
+
+    if (pathname === '/api/drive/tasks' && method === 'GET') {
+      sendJson(response, 200, { tasks: listUploadTasks() })
+      return true
+    }
+
+    if (pathname === '/api/drive/tasks/reset' && method === 'POST') {
+      const origin = request.headers.origin
+      if (request.headers['sec-fetch-site'] === 'cross-site' || (origin && new URL(origin).host !== request.headers.host)) {
+        sendJson(response, 403, { error: 'Reset upload tasks from the local Combo Maker page.' })
+        return true
+      }
+      const id = String((await readJson(request)).id ?? '')
+      if (id.startsWith('zip:')) {
+        const zipId = id.slice(4)
+        const savedZip = runPath(zipId) ? join(r2ZipHistory, `${zipId}.json`) : null
+        if (!savedZip || !existsSync(savedZip)) {
+          sendJson(response, 404, { error: 'That saved ZIP upload task was not found.' })
+          return true
+        }
+        if (r2ZipJobs.get(zipId)?.status === 'running') {
+          sendJson(response, 400, { error: 'Wait for this ZIP import to finish before resetting it.' })
+          return true
+        }
+        rmSync(savedZip)
+        r2ZipJobs.delete(zipId)
+        sendJson(response, 200, { tasks: listUploadTasks() })
+        return true
+      }
+      const saved = runPath(id)
+      if (!saved || !existsSync(saved)) {
+        sendJson(response, 404, { error: 'That saved upload task was not found.' })
+        return true
+      }
+      if (driveRun?.id === id && ['running', 'paused'].includes(driveRun.status)) {
+        sendJson(response, 400, { error: 'Stop this upload before resetting its saved progress.' })
+        return true
+      }
+      rmSync(saved)
+      resetRunIds.add(id)
+      if (driveRun?.id === id) {
+        driveRun = null
+        rmSync(RUN_FILE, { force: true })
+      }
+      sendJson(response, 200, { tasks: listUploadTasks() })
       return true
     }
 
@@ -869,8 +1221,8 @@ async function handleDrive(request, response, pathname, method) {
       const credentials = drive.readCredentials(root)
       // Either destination is enough on its own: Drive for the folder layout,
       // Cloudinary for the URLs the listing sheet is made of.
-      if (!credentials?.refreshToken && !cloudinary.readCredentials(root)) {
-        sendJson(response, 400, { error: 'Connect Google Drive or Cloudinary first.' })
+      if (!credentials?.refreshToken && !readImageHost()) {
+        sendJson(response, 400, { error: 'Connect Google Drive, Cloudinary or Cloudflare R2 first.' })
         return true
       }
       if (driveRun?.status === 'running') {
@@ -883,7 +1235,42 @@ async function handleDrive(request, response, pathname, method) {
         String(body.folderName ?? '').trim() || 'Combo Maker exports',
         String(body.layout ?? 'combo'),
       )
+      saveRun(run)
       sendJson(response, 200, { started: true, folder: run.folder, link: run.link })
+      return true
+    }
+
+    if (pathname === '/api/drive/images/pause' && method === 'POST') {
+      if (!driveRun || driveRun.status !== 'running' || !driveRun.layout) {
+        sendJson(response, 400, { error: 'No canvas upload is running.' })
+        return true
+      }
+      driveRun.status = 'paused'
+      saveRun(driveRun)
+      sendJson(response, 200, { run: driveRun })
+      return true
+    }
+
+    if (pathname === '/api/drive/images/resume' && method === 'POST') {
+      if (!driveRun || !['paused', 'cancelled', 'failed'].includes(driveRun.status) || !driveRun.layout) {
+        sendJson(response, 400, { error: 'No paused or stopped canvas upload can be continued.' })
+        return true
+      }
+      const body = await readJson(request)
+      const groups = Array.isArray(body.groups) ? body.groups : []
+      const expected = new Map(groups.map((group) => [String(group.sku ?? ''), Number(group.count ?? 0)]))
+      if (!groups.length || expected.size !== groups.length || driveRun.layout !== body.layout ||
+        !Array.isArray(driveRun.manifest) || !driveRun.manifest.every((entry) => expected.has(entry.sku))) {
+        sendJson(response, 400, { error: 'Generate the same lot with the same upload layout before continuing.' })
+        return true
+      }
+      const completed = driveRun.manifest.filter((entry) =>
+        entry.images.length >= expected.get(entry.sku) && entry.images.every((image) => image.url || image.hosted)).map((entry) => entry.sku)
+      driveRun.manifest = driveRun.manifest.filter((entry) => completed.includes(entry.sku))
+      driveRun.useDrive = Boolean(driveRun.rootId)
+      driveRun.status = 'running'
+      saveRun(driveRun)
+      sendJson(response, 200, { run: driveRun, completed })
       return true
     }
 
@@ -977,7 +1364,7 @@ async function handleDrive(request, response, pathname, method) {
     }
 
     if (pathname === '/api/drive/cancel' && method === 'POST') {
-      if (driveRun?.status === 'running') driveRun.status = 'cancelled'
+      if (driveRun?.status === 'running' || driveRun?.status === 'paused') driveRun.status = 'cancelled'
       saveRun(driveRun)
       sendJson(response, 200, { run: driveRun })
       return true
@@ -1221,6 +1608,8 @@ async function handleApi(request, response, pathname) {
   if (pathname.startsWith('/api/queue')) return handleQueue(request, response, pathname, method)
   if (pathname.startsWith('/api/templates')) return handleTemplates(request, response, pathname, method)
   if (pathname.startsWith('/api/drive')) return handleDrive(request, response, pathname, method)
+  if (pathname.startsWith('/api/r2')) return handleR2(request, response, pathname, method)
+  if (pathname.startsWith('/api/scene')) return handleScene(request, response, pathname, method)
   if (pathname.startsWith('/api/cloudinary')) return handleCloudinary(request, response, pathname, method)
 
   const runMatch = /^\/api\/ai\/runs\/([\w-]+)(\/cancel)?$/.exec(pathname)

@@ -22,7 +22,7 @@ import {
 } from './compose.ts'
 import { createZip, type ZipEntry } from './zip.ts'
 import { comboFolder, comboName } from './naming.ts'
-import { buildGroups, minimumImages, type GroupMode } from './grouping.ts'
+import { buildGroups, countGroups, minimumImages, type GroupMode } from './grouping.ts'
 import {
   AI_BACKGROUNDS,
   ANGLES,
@@ -51,10 +51,25 @@ import {
   fetchRun,
   revealFolder,
   cancelDriveUpload,
+  pauseDriveImages,
+  resumeDriveImages,
   disconnectDrive,
   cloudinaryStatus,
   disconnectCloudinary,
+  r2Status,
+  saveR2,
+  disconnectR2,
+  uploadProductImagesToR2,
+  uploadZipToR2,
+  r2ZipImportStatus,
+  type R2ZipImport,
+  sceneStatus,
+  saveSceneKey,
+  disconnectScene,
+  generateScene,
   driveStatus,
+  listUploadTasks,
+  resetUploadTask,
   saveCloudinary,
   reconnectDrive,
   saveDriveClient,
@@ -65,6 +80,7 @@ import {
   finishDriveImages,
   LISTING_SHEET_URL,
   type DriveGroup,
+  type UploadTask,
   deleteTemplate,
   fileToBase64,
   listTemplates,
@@ -81,6 +97,7 @@ import {
   toReference,
   type AiConfig,
   type CloudinaryStatus,
+  type R2Status,
   type DriveStatus,
   type Estimate,
   type QueueSummary,
@@ -95,12 +112,12 @@ type Product = { id: number; file: File; url: string; hostedUrl?: string; framin
 type Result = {
   name: string
   blob: Blob
-  url: string
+  url?: string
   index: number
   /** The product photos this combo was composed from, in frame order. */
   sources: File[]
 }
-type Tab = 'canvas' | 'ai'
+type Tab = 'canvas' | 'ai' | 'scene'
 
 const MANAGED_ACCESS = import.meta.env.VITE_MANAGED_ACCESS === 'true'
 const INVITE_PORTAL = import.meta.env.VITE_INVITE_PORTAL === 'true'
@@ -177,7 +194,10 @@ const ai = {
   reversing: false,
   reversed: [] as { file: string; prompt: string; error: string | null }[],
   drive: null as DriveStatus | null,
+  uploadTasks: [] as UploadTask[],
+  selectedUploadTask: '',
   cloudinary: null as CloudinaryStatus | null,
+  r2: null as R2Status | null,
   driveFolder: '',
   driveBusy: false,
   driveFlipkart: true,
@@ -202,6 +222,23 @@ let results: Result[] = []
 let nextId = 1
 let busy = false
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+const scene = {
+  connected: false,
+  start: 1,
+  count: 1,
+  model: 'gpt-image-2.5-flare',
+  background: 'a clean warm white studio surface with soft natural shadows',
+  extra: '',
+  busy: false,
+  stop: false,
+  results: [] as Result[],
+  hostedUrls: [] as string[],
+  resultStart: 1,
+}
+const LOT_SIZE = 2000
+const PREVIEW_LIMIT = 60
+let selectedLot = 1
+let resultLot = 1
 
 /** Prepared canvases are expensive; keyed by product + trim setting. */
 const prepCache = new Map<string, PreparedImage>()
@@ -267,13 +304,14 @@ app.innerHTML = `
         <h1>Make every combo<br><em>look intentional.</em></h1>
         <p class="lede">Upload your product shots, pick a set size, and export clean marketplace-ready combos. Every product is trimmed and scaled to match, so nothing floats or towers over the rest.</p>
       </div>
-      <div class="intro-note"><span>01</span><p>Your files stay in this browser.<br>No upload, no account, no fuss.</p></div>
+      <div class="intro-note"><span>01</span><p>Canvas runs locally.<br>AI scenes send selected photos to OpenAI.</p></div>
     </section>
 
     ${STATIC_HOST ? '<p class="hosting-note">Create and download combos on your phone, tablet, or computer. Photos stay in this browser and are not saved after you close or refresh the page. AI, saved templates, Google Drive, and image hosting require the local app. <a href="https://github.com/sahilajmani00-hub/combo-maker#run-it">Local app setup</a> · <a href="./privacy.html">Privacy policy</a></p>' : ''}
     <div class="mode-switch" role="tablist" aria-label="Combo builder">
       <button class="mode-tab selected" data-tab="canvas" role="tab" aria-selected="true"><b>Canvas combos</b><span>Arrange the real photos side by side. Offline and free.</span></button>
       <button class="mode-tab" data-tab="ai" role="tab" aria-selected="false"><b>AI angle combos</b><span>Higgsfield re-shoots each set from several camera angles.</span></button>
+      <button class="mode-tab" data-tab="scene" role="tab" aria-selected="false"><b>AI scene combos</b><span>Place the real products together in one generated setting.</span></button>
     </div>
 
     <div class="workspace">
@@ -324,6 +362,46 @@ app.innerHTML = `
           <div id="drive-connected-row" class="hidden">
             <span class="count-label connected">Google Drive connected</span>
             <button id="drive-disconnect" class="link-button">Disconnect</button>
+          </div>
+        </div>
+
+        <div class="rule server-feature"></div>
+        <div class="field server-feature">
+          <span class="field-label">Cloudflare R2 image URLs</span>
+          <div id="r2-connect" class="connect-box">
+            <div class="connect-fields">
+              <input id="r2-account-id" type="text" placeholder="Cloudflare Account ID" autocomplete="off" spellcheck="false">
+              <input id="r2-bucket" type="text" placeholder="R2 bucket name" autocomplete="off" spellcheck="false">
+              <input id="r2-access-key" type="text" placeholder="R2 access key ID" autocomplete="off" spellcheck="false">
+              <input id="r2-secret-key" type="password" placeholder="R2 secret access key" autocomplete="off">
+              <input id="r2-public-url" type="url" placeholder="Public base URL (https://...)" autocomplete="off" spellcheck="false">
+            </div>
+            <button id="r2-save" class="ghost-button">Connect Cloudflare R2</button>
+            <p id="r2-status" class="hint hidden"></p>
+            <p class="mode-copy">Create an R2 S3 API token scoped to this bucket with Object Read &amp; Write. Enter the bucket's public base URL: <code>r2.dev</code> is for testing and rate-limited; use a custom domain for marketplace listings. Anyone with a public image URL can view it, so only host listing photos here. Access keys stay in the local launcher's settings file.</p>
+          </div>
+          <div id="r2-connected-row" class="hidden">
+            <span id="r2-name" class="count-label connected">Cloudflare R2 connected</span>
+            <button id="r2-disconnect" class="link-button">Disconnect</button>
+          </div>
+          <div id="r2-archive" class="connect-box hidden">
+            <span class="field-label">Import image URLs from a ZIP</span>
+            <input id="r2-archive-file" type="file" accept=".zip,application/zip">
+            <button id="r2-archive-upload" class="ghost-button" disabled>Extract images &amp; upload to R2</button>
+            <p class="mode-copy">Choose a ZIP from any folder (up to 2 GB). Each JPG, PNG or WebP gets its own public R2 URL. Download a CSV of names and URLs when the import finishes.</p>
+            <p id="r2-archive-status" class="hint hidden"></p>
+            <div id="r2-archive-result" class="hidden"><button id="r2-archive-download" class="ghost-button">Download URL list (CSV)</button> <button id="r2-archive-copy" class="link-button">Copy all image URLs</button></div>
+          </div>
+        </div>
+
+        <div class="rule server-feature"></div>
+        <div class="field server-feature">
+          <span class="field-label">Saved upload tasks</span>
+          <div class="connect-box">
+            <select id="upload-task-select" aria-label="Choose saved upload task"></select>
+            <button id="upload-task-reset" class="ghost-button" disabled>Reset selected task</button>
+            <p class="mode-copy">Clears the selected task's local upload progress and URL sheet. Images already uploaded to R2, Cloudinary or Drive stay online. Saved templates and alignments stay as they are.</p>
+            <p id="upload-task-message" class="hint hidden"></p>
           </div>
         </div>
 
@@ -404,6 +482,11 @@ app.innerHTML = `
         <div class="recipe-meta"><span>Output size</span><strong id="size-label"></strong></div>
         <div class="recipe-meta"><span>Combos to build</span><strong id="combo-count"></strong></div>
         <div class="recipe-meta"><span>Example name</span><strong id="combo-example">—</strong></div>
+        <div class="field">
+          <label class="field-label" for="lot-select">Generate one lot at a time</label>
+          <select id="lot-select"></select>
+          <p id="lot-copy" class="mode-copy">Each lot contains up to 2,000 combos. Save your template after changing a photo's framing; that framing applies to the same photo in every lot.</p>
+        </div>
 
         <button id="generate-button" class="primary-button" disabled><span id="generate-text">Generate combos</span><span>&rarr;</span></button>
         <p id="hint" class="hint"></p>
@@ -555,6 +638,31 @@ app.innerHTML = `
         <p class="mode-copy">Writes the reference images and prompts to a folder and hands them to the Combo Maker browser extension, so you can upload and download them yourself on higgsfield.ai. Costs nothing.</p>
         <p id="ai-hint" class="hint"></p>
       </section>
+      <section class="panel scene-panel hidden">
+        <div class="panel-heading"><div><span class="step">02</span><h2>AI scene combos</h2></div></div>
+        <p class="section-copy">Use each product photo as a reference. AI arranges the products together on one shared background, with matching light and shadows. Check details before publishing.</p>
+        <div id="scene-connect" class="connect-box">
+          <span class="field-label">OpenAI API key</span>
+          <input id="scene-key" class="text-input" type="password" placeholder="OpenAI API key" autocomplete="off">
+          <button id="scene-save-key" class="ghost-button">Connect OpenAI</button>
+          <p class="mode-copy">Create a key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">OpenAI API keys</a>. It stays in the local launcher's settings file. OpenAI API image generation is billed separately from ChatGPT.</p>
+        </div>
+        <div id="scene-connected" class="hidden"><span class="count-label connected">OpenAI API key saved</span> <button id="scene-disconnect" class="link-button">Disconnect</button></div>
+        <div class="rule"></div>
+        <p class="section-copy">How many products in each scene?</p>
+        <div id="scene-size-options" class="size-options" role="radiogroup" aria-label="AI scene combo size"></div>
+        <div class="field"><span class="field-label">Which product sets?</span><div id="scene-mode-options" class="chip-row"></div></div>
+        <div class="field"><label class="field-label" for="scene-start">First combo number</label><input id="scene-start" class="text-input" type="number" min="1" step="1" value="1"></div>
+        <div class="field"><label class="field-label" for="scene-count">Scenes to make now (1–20)</label><input id="scene-count" class="text-input" type="number" min="1" max="20" step="1" value="1"></div>
+        <p id="scene-range" class="mode-copy"></p>
+        <div class="field"><span class="field-label">Model</span><div id="scene-model-options" class="chip-row"><button class="chip selected" data-scene-model="gpt-image-2.5-flare">Flare · faster</button><button class="chip" data-scene-model="gpt-image-2.5-sunburst">Sunburst · precise</button></div></div>
+        <div class="field"><label class="field-label" for="scene-background">Shared background</label><input id="scene-background" class="text-input" type="text" value="a clean warm white studio surface with soft natural shadows" spellcheck="false"></div>
+        <div class="field"><label class="field-label" for="scene-extra">Additional direction (optional)</label><textarea id="scene-extra" class="text-input" rows="3" placeholder="For example: Arrange the earrings around a small gift box."></textarea></div>
+        <p class="mode-copy">One paid OpenAI image edit is requested for each scene. Start with one to check how well the product details are preserved.</p>
+        <button id="scene-generate" class="primary-button" disabled><span id="scene-generate-text">Generate AI scene</span><span>&rarr;</span></button>
+        <button id="scene-stop" class="link-button hidden">Stop after current scene</button>
+        <p id="scene-hint" class="hint"></p>
+      </section>
     </div>
 
     <section id="result-section" class="result-section hidden">
@@ -564,11 +672,14 @@ app.innerHTML = `
           <div id="canvas-layout-options" class="chip-row result-chips"></div>
           <button id="canvas-sheet" class="download-button ghost" disabled>Listing sheet (XLSX)</button>
           <button id="canvas-drive-upload" class="download-button ghost">Save to Drive</button>
+          <button id="canvas-drive-pause" class="download-button ghost hidden">Pause after batch</button>
+          <button id="canvas-drive-continue" class="download-button ghost hidden">Continue upload</button>
           <button id="canvas-drive-stop" class="download-button ghost hidden">Stop</button>
           <button id="download-zip" class="download-button">Download all (ZIP) <span>&darr;</span></button>
         </div>
       </div>
       <p id="canvas-drive-copy" class="hint"></p>
+      <p id="preview-copy" class="mode-copy"></p>
       <div id="result-grid" class="result-grid"></div>
     </section>
 
@@ -588,6 +699,11 @@ app.innerHTML = `
       <p id="ai-progress-copy" class="hint"></p>
       <div id="ai-run-grid" class="combo-grid"></div>
     </section>
+    <section id="scene-result-section" class="result-section hidden">
+      <div class="result-heading"><div><p class="eyebrow">03 / AI SCENES</p><h2 id="scene-result-title">Generated scenes</h2></div><div class="result-actions"><button id="scene-download-zip" class="download-button">Download scenes (ZIP)</button><button id="scene-upload-r2" class="download-button ghost">Upload scenes to R2</button><button id="scene-copy-urls" class="link-button hidden">Copy image URLs</button></div></div>
+      <p id="scene-results-status" class="hint"></p>
+      <div id="scene-result-grid" class="result-grid"></div>
+    </section>
   </main>
   <footer><span>Combo Maker</span><span>Local image composition tool</span></footer>
 `
@@ -605,6 +721,7 @@ const resultGrid = el<HTMLDivElement>('#result-grid')
 
 const aiPanel = el<HTMLElement>('.ai-panel')
 const recipePanel = el<HTMLElement>('.recipe-panel')
+const scenePanel = el<HTMLElement>('.scene-panel')
 const aiGenerateButton = el<HTMLButtonElement>('#ai-generate-button')
 const aiGenerateText = el<HTMLSpanElement>('#ai-generate-text')
 const aiHint = el<HTMLParagraphElement>('#ai-hint')
@@ -652,37 +769,54 @@ function renderControls() {
   el('#layout-label').textContent = layoutLabel(state.comboSize, state.layout)
   el('#size-label').textContent = `${RATIOS[state.ratio].width} × ${RATIOS[state.ratio].height}`
 
-  const groups = comboGroups()
+  const total = countGroups(state.products.length, state.comboSize, state.mode)
+  const lots = Math.max(1, Math.ceil(total / LOT_SIZE))
+  selectedLot = Math.min(selectedLot, lots)
+  const start = (selectedLot - 1) * LOT_SIZE
+  const lotSize = Math.min(LOT_SIZE, Math.max(0, total - start))
+  const example = total ? buildGroups(state.products, state.comboSize, state.mode, 1, start)[0] : null
+  const lotSelect = el<HTMLSelectElement>('#lot-select')
+  lotSelect.innerHTML = total ? Array.from({ length: lots }, (_, index) => {
+    const from = index * LOT_SIZE + 1
+    const to = Math.min(total, from + LOT_SIZE - 1)
+    return `<option value="${index + 1}">Lot ${index + 1} · combos ${from.toLocaleString()}–${to.toLocaleString()}</option>`
+  }).join('') : '<option value="1">Add product photos first</option>'
+  lotSelect.value = String(selectedLot)
+  lotSelect.disabled = busy || !total
+  el('#lot-copy').textContent = total > LOT_SIZE
+    ? `${lots} lots, ${total.toLocaleString()} combos total. Each lot can be generated and downloaded separately. Photo framing applies to every lot; save the template after any framing edits you want to keep for another day.`
+    : `This lot has ${lotSize.toLocaleString()} combos. Photo framing applies to every combo; save the template after edits you want to keep for another day.`
   const leftover = state.mode === 'sequential'
-    ? state.products.length - groups.length * state.comboSize
+    ? state.products.length - total * state.comboSize
     : 0
 
-  el('#combo-count').textContent = groups.length
-    ? `${groups.length}${leftover ? ` (+${leftover} spare)` : ''}`
+  el('#combo-count').textContent = total
+    ? `${lotSize.toLocaleString()} in lot ${selectedLot} · ${total.toLocaleString()} total${leftover ? ` (+${leftover} spare)` : ''}`
     : '—'
   // Seeing the first one is the quickest way to tell whether the names are worth
   // fixing before a run of several hundred folders is written.
-  el('#combo-example').textContent = groups.length
-    ? comboName(groups[0].map((product) => product.file.name), state.format === 'png' ? 'png' : 'jpg', new Set())
+  el('#combo-example').textContent = example
+    ? comboName(example.map((product) => product.file.name), state.format === 'png' ? 'png' : 'jpg', new Set())
     : '—'
 
-  generateButton.disabled = busy || groups.length === 0
+  generateButton.disabled = busy || total === 0
   if (busy) return
+  generateText.textContent = total > LOT_SIZE ? `Generate lot ${selectedLot}` : 'Generate combos'
 
   const needed = minimumImages(state.comboSize, state.mode)
   hint.className = 'hint'
   if (!state.products.length) {
     hint.textContent = `Add at least ${plural(needed, 'product image')} to continue.`
-  } else if (!groups.length) {
+  } else if (!total) {
     hint.textContent = `Add ${plural(needed - state.products.length, 'more image')} to complete a set of ${state.comboSize}.`
   } else if (state.mode === 'combinations') {
-    hint.textContent = `${plural(groups.length, 'combo')} — every set of ${state.comboSize} from your ${state.products.length} images.`
+    hint.textContent = `${lotSize.toLocaleString()} combos in this lot of ${total.toLocaleString()} — every set of ${state.comboSize} from your ${state.products.length} images.`
   } else if (state.mode === 'repeats') {
-    hint.textContent = `${plural(groups.length, 'combo')} — every set of ${state.comboSize} from your ${state.products.length} images, repeats allowed.`
+    hint.textContent = `${lotSize.toLocaleString()} combos in this lot of ${total.toLocaleString()} — repeats allowed.`
   } else {
     hint.textContent = leftover
-      ? `${plural(groups.length, 'combo')} from ${groups.length * state.comboSize} images · ${leftover} left over.`
-      : `${plural(groups.length, 'combo')} from all ${state.products.length} images.`
+      ? `${plural(total, 'combo')} from ${total * state.comboSize} images · ${leftover} left over.`
+      : `${plural(total, 'combo')} from all ${state.products.length} images.`
   }
 }
 
@@ -710,9 +844,9 @@ function renderProducts() {
   el('#count-label').textContent = plural(state.products.length, 'image')
   el<HTMLButtonElement>('#download-products-zip').disabled = state.products.length === 0
   const urlsButton = el<HTMLButtonElement>('#get-product-urls')
-  const hosting = Boolean(ai.cloudinary?.configured)
+  const hosting = hasImageHost()
   urlsButton.disabled = state.products.length === 0 || !hosting
-  urlsButton.title = hosting ? '' : 'Connect Cloudinary in this panel first.'
+  urlsButton.title = hosting ? '' : 'Connect Cloudflare R2 or Cloudinary in this panel first.'
   el('#copy-all-urls').classList.toggle('hidden', !state.products.some((product) => product.hostedUrl))
   // Rewriting the list while a name is being typed would steal the caret. Only
   // that one field is protected: every other control in the list expects the
@@ -755,6 +889,16 @@ function renderProducts() {
   else framingOpen = null
 }
 
+function hasImageHost() {
+  return Boolean(ai.r2?.configured || ai.cloudinary?.configured)
+}
+
+function imageHostName() {
+  if (ai.r2?.configured) return `Cloudflare R2 (${ai.r2.bucket})`
+  if (ai.cloudinary?.configured) return `Cloudinary (${ai.cloudinary.cloudName})`
+  return ''
+}
+
 /** `per` is what one slider step is worth, so degrees stay degrees. */
 const FRAMING_SLIDERS = [
   { key: 'zoom', label: 'Zoom', min: 50, max: 250, per: 100, unit: '%' },
@@ -795,7 +939,8 @@ function framingPanel(product: Product): string {
     <div class="framing-controls">
       ${sliders}
       <div class="framing-foot">
-        <p class="mode-copy">Each area is framed on its own, and every combo that puts this photo there follows. Generate again to rebuild them.</p>
+        <p class="mode-copy">This photo keeps its framing across every lot. Use the current alignment in every area, then edit any area separately if needed. Save the template to keep changes for another day.</p>
+        <button class="chip" data-framing-apply-all="${product.id}">Use in every area</button>
         <button class="chip" data-framing-reset="${product.id}">Reset area</button>
       </div>
     </div>
@@ -809,8 +954,7 @@ function framingPanel(product: Product): string {
  * one deliberately is not a fiction — it is the combo the person will get.
  */
 function previewGroup(product: Product, area: number): Product[] {
-  const found = comboGroups().find((items) => items.some((item) => item.id === product.id))
-  const pool = found ?? state.products.slice(0, state.comboSize)
+  const pool = state.products.slice(0, state.comboSize)
   const group = [...pool]
   if (!group.length) return [product]
   while (group.length < state.comboSize) group.push(pool[group.length % pool.length])
@@ -845,18 +989,34 @@ async function renderFramingPreview(product: Product, only?: number) {
   }
 }
 
-function renderResults() {
-  resultSection.classList.toggle('hidden', tab !== 'canvas' || results.length === 0)
-  el('#result-title').textContent = `Your combo ${results.length === 1 ? 'image' : 'images'}`
-  resultGrid.innerHTML = results
-    .map((result) => `<div class="result-card">
+function resultCard(result: Result): string {
+  return `<div class="result-card">
       <div class="result-frame"><img src="${result.url}" alt="Combo ${result.index}"></div>
       <div class="result-foot"><span>${escapeHtml(result.name)}</span><a href="${result.url}" download="${escapeHtml(result.name)}">Download</a></div>
-    </div>`)
-    .join('')
+    </div>`
+}
+
+function updateResultSummary() {
+  resultSection.classList.toggle('hidden', tab !== 'canvas' || results.length === 0)
+  el('#result-title').textContent = `Lot ${resultLot} · ${plural(results.length, 'combo image')}`
+  el('#preview-copy').textContent = results.length > PREVIEW_LIMIT
+    ? `Showing the first ${PREVIEW_LIMIT} previews. All ${results.length.toLocaleString()} images are included when you download or upload this lot.`
+    : ''
+  el<HTMLButtonElement>('#download-zip').disabled = busy || !results.length
+}
+
+function renderResults() {
+  updateResultSummary()
+  resultGrid.innerHTML = results.slice(0, PREVIEW_LIMIT).map(resultCard).join('')
   // Keeps the canvas tab's "Save to Drive" button in sync even when results
   // change outside a full refresh() — generate() renders incrementally.
   renderDrive()
+}
+
+function appendResult(result: Result) {
+  if (results.length <= PREVIEW_LIMIT) resultGrid.insertAdjacentHTML('beforeend', resultCard(result))
+  updateResultSummary()
+  if (results.length === 1 || results.length % 25 === 0) renderDrive()
 }
 
 /**
@@ -893,6 +1053,7 @@ function currentSettings(): Record<string, unknown> {
       // travel by position instead.
       captions: state.products.map((product) => ai.captions[product.id] ?? ''),
     },
+    scene: { model: scene.model, background: scene.background, extra: scene.extra },
   }
 }
 
@@ -940,6 +1101,12 @@ function applySettings(settings: Record<string, unknown>) {
   el<HTMLInputElement>('#ai-white-first').checked = ai.whiteFirst
   el<HTMLInputElement>('#ai-concurrency').value = String(ai.concurrency)
   el('#ai-concurrency-value').textContent = String(ai.concurrency)
+  const savedScene = (settings.scene ?? {}) as Record<string, unknown>
+  if (savedScene.model === 'gpt-image-2.5-flare' || savedScene.model === 'gpt-image-2.5-sunburst') scene.model = savedScene.model
+  scene.background = typeof savedScene.background === 'string' ? savedScene.background : scene.background
+  scene.extra = typeof savedScene.extra === 'string' ? savedScene.extra : scene.extra
+  el<HTMLInputElement>('#scene-background').value = scene.background
+  el<HTMLTextAreaElement>('#scene-extra').value = scene.extra
 }
 
 function renderTemplates() {
@@ -965,6 +1132,7 @@ function renderTabs() {
   })
   recipePanel.classList.toggle('hidden', tab !== 'canvas')
   aiPanel.classList.toggle('hidden', tab !== 'ai')
+  scenePanel.classList.toggle('hidden', tab !== 'scene')
 }
 
 function refresh() {
@@ -975,6 +1143,8 @@ function refresh() {
   renderAiControls()
   renderResults()
   renderAiRun()
+  renderSceneControls()
+  renderSceneResults()
 }
 
 /* ---------------- product input ---------------- */
@@ -1126,6 +1296,15 @@ productList.addEventListener('click', (event) => {
     const product = state.products.find((item) => item.id === Number(reset.dataset.framingReset))
     if (!product) return
     product.framing[framingArea] = { ...DEFAULT_FRAMING }
+    renderProducts()
+    return
+  }
+  const applyAll = target.closest<HTMLButtonElement>('[data-framing-apply-all]')
+  if (applyAll) {
+    const product = state.products.find((item) => item.id === Number(applyAll.dataset.framingApplyAll))
+    if (!product) return
+    const framing = product.framing[framingArea]
+    product.framing = product.framing.map(() => ({ ...framing }))
     renderProducts()
   }
 })
@@ -1338,55 +1517,277 @@ async function compositeReference(group: Product[]): Promise<HTMLCanvasElement> 
 }
 
 function clearResults() {
-  results.forEach((result) => URL.revokeObjectURL(result.url))
+  results.forEach((result) => { if (result.url) URL.revokeObjectURL(result.url) })
   results = []
+  renderResults()
 }
 
 async function generate() {
-  const groups = comboGroups()
+  const lot = selectedLot
+  const start = (lot - 1) * LOT_SIZE
+  const groups = buildGroups(state.products, state.comboSize, state.mode, LOT_SIZE, start)
   if (!groups.length) return
+  if (results.length && !window.confirm(`Generating lot ${lot} replaces the current lot's images in this tab. Download or upload the current lot first. Continue?`)) return
 
   busy = true
   generateButton.disabled = true
+  resultLot = lot
   clearResults()
 
   const extension = state.format === 'png' ? 'png' : 'jpg'
   const mime = state.format === 'png' ? 'image/png' : 'image/jpeg'
   const usedNames = new Set<string>()
+  let outcome = { text: '', error: false }
 
   try {
     for (const [index, group] of groups.entries()) {
-      generateText.textContent = `Composing ${index + 1} of ${groups.length}...`
-      hint.className = 'hint'
-      hint.textContent = `Trimming and aligning set ${index + 1}...`
-      // Yield so the label above actually paints between sets.
-      await new Promise((resolve) => setTimeout(resolve, 0))
+      if (index === 0 || index % 10 === 0) {
+        generateText.textContent = `Lot ${lot}: ${index + 1} of ${groups.length}...`
+        hint.className = 'hint'
+        hint.textContent = `Composing lot ${lot}, set ${index + 1}...`
+        // Give the browser time to paint progress without delaying every image.
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
 
       const canvas = composeCombo(await framedImages(group), canvasOptions())
       const blob = await canvasToBlob(canvas, mime, state.format === 'jpeg' ? 0.92 : undefined)
-      results.push({
+      canvas.width = 0
+      canvas.height = 0
+      const result: Result = {
         name: comboName(group.map((product) => product.file.name), extension, usedNames),
         blob,
-        url: URL.createObjectURL(blob),
-        index: index + 1,
+        url: index < PREVIEW_LIMIT ? URL.createObjectURL(blob) : undefined,
+        index: start + index + 1,
         sources: group.map((product) => product.file),
-      })
-      renderResults()
+      }
+      results.push(result)
+      appendResult(result)
     }
-    hint.className = 'hint'
-    hint.textContent = `Done — ${plural(results.length, 'combo')} ready to download.`
+    outcome = { text: `Lot ${lot} done — ${plural(results.length, 'combo')} ready to download. Choose another lot after saving this one.`, error: false }
     resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' })
   } catch (error) {
-    hint.className = 'hint error'
-    hint.textContent = error instanceof Error ? error.message : 'Something went wrong while composing.'
+    outcome = { text: error instanceof Error ? error.message : 'Something went wrong while composing.', error: true }
   } finally {
     busy = false
-    generateText.textContent = 'Generate combos'
     renderControls()
+    renderResults()
+    hint.className = outcome.error ? 'hint error' : 'hint'
+    hint.textContent = outcome.text
   }
 }
 
 generateButton.addEventListener('click', generate)
+el<HTMLSelectElement>('#lot-select').addEventListener('change', (event) => {
+  selectedLot = Number((event.target as HTMLSelectElement).value)
+  renderControls()
+})
+
+function renderSceneControls() {
+  const total = countGroups(state.products.length, state.comboSize, state.mode)
+  scene.start = Math.min(Math.max(1, scene.start), Math.max(1, total))
+  scene.count = Math.min(Math.max(1, scene.count), 20, Math.max(1, total - scene.start + 1))
+  el('#scene-size-options').innerHTML = sizeOptionsHtml()
+  el('#scene-mode-options').innerHTML = modeOptionsHtml()
+  el('#scene-connect').classList.toggle('hidden', scene.connected)
+  el('#scene-connected').classList.toggle('hidden', !scene.connected)
+  const start = el<HTMLInputElement>('#scene-start')
+  const count = el<HTMLInputElement>('#scene-count')
+  start.max = String(Math.max(1, total))
+  start.disabled = scene.busy
+  count.disabled = scene.busy
+  el<HTMLInputElement>('#scene-background').disabled = scene.busy
+  el<HTMLTextAreaElement>('#scene-extra').disabled = scene.busy
+  if (document.activeElement !== start) start.value = String(scene.start)
+  if (document.activeElement !== count) count.value = String(scene.count)
+  const example = total ? buildGroups(state.products, state.comboSize, state.mode, 1, scene.start - 1)[0] : null
+  el('#scene-range').textContent = total
+    ? `Ready for combos ${scene.start.toLocaleString()}–${(scene.start + scene.count - 1).toLocaleString()} of ${total.toLocaleString()}. Each combo becomes one AI scene. First set: ${example?.map((product) => product.file.name).join(' + ') ?? '—'}.`
+    : `Add at least ${minimumImages(state.comboSize, state.mode)} product photos to make a scene.`
+  el('#scene-model-options').querySelectorAll<HTMLButtonElement>('[data-scene-model]').forEach((button) => {
+    button.classList.toggle('selected', button.dataset.sceneModel === scene.model)
+  })
+  el<HTMLButtonElement>('#scene-generate').disabled = scene.busy || !scene.connected || !total
+  el('#scene-generate-text').textContent = scene.busy ? 'Generating scenes...' : `Generate ${plural(scene.count, 'AI scene')}`
+  el('#scene-stop').classList.toggle('hidden', !scene.busy)
+}
+
+function renderSceneResults() {
+  const section = el('#scene-result-section')
+  section.classList.toggle('hidden', tab !== 'scene' || !scene.results.length)
+  el('#scene-result-title').textContent = `${plural(scene.results.length, 'AI scene')}`
+  el('#scene-result-grid').innerHTML = scene.results.map(resultCard).join('')
+  el<HTMLButtonElement>('#scene-download-zip').disabled = scene.busy || !scene.results.length
+  el<HTMLButtonElement>('#scene-upload-r2').disabled = scene.busy || !scene.results.length || !ai.r2?.configured
+  el('#scene-copy-urls').classList.toggle('hidden', !scene.hostedUrls.length)
+}
+
+function sayScene(message: string, error = false) {
+  for (const selector of ['#scene-hint', '#scene-results-status']) {
+    const target = el(selector)
+    target.className = error ? 'hint error' : 'hint'
+    target.textContent = message
+  }
+}
+
+async function refreshSceneStatus() {
+  try {
+    scene.connected = (await sceneStatus()).configured
+  } catch {
+    scene.connected = false
+  }
+  renderSceneControls()
+}
+
+el('#scene-save-key').addEventListener('click', async () => {
+  const keyInput = el<HTMLInputElement>('#scene-key')
+  try {
+    scene.connected = (await saveSceneKey(keyInput.value.trim())).configured
+    keyInput.value = ''
+    renderSceneControls()
+    sayScene('OpenAI API key saved locally. Start with one scene and review its product details.')
+  } catch (error) {
+    sayScene(error instanceof Error ? error.message : 'Could not save the key.', true)
+  }
+})
+
+el('#scene-disconnect').addEventListener('click', async () => {
+  try {
+    scene.connected = (await disconnectScene()).configured
+    renderSceneControls()
+    sayScene('OpenAI API key removed from local settings.')
+  } catch (error) {
+    sayScene(error instanceof Error ? error.message : 'Could not remove the key.', true)
+  }
+})
+
+scenePanel.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-size], [data-mode], [data-scene-model]')
+  if (!button || scene.busy) return
+  if (button.dataset.size) {
+    state.comboSize = Number(button.dataset.size) as ComboSize
+    state.layout = normalizeLayout(state.comboSize, state.layout)
+    refresh()
+  } else if (button.dataset.mode) {
+    state.mode = button.dataset.mode as GroupMode
+    refresh()
+  } else if (button.dataset.sceneModel) {
+    scene.model = button.dataset.sceneModel
+    renderSceneControls()
+  }
+})
+
+el<HTMLInputElement>('#scene-start').addEventListener('change', (event) => {
+  scene.start = Number((event.target as HTMLInputElement).value) || 1
+  renderSceneControls()
+})
+el<HTMLInputElement>('#scene-count').addEventListener('change', (event) => {
+  scene.count = Number((event.target as HTMLInputElement).value) || 1
+  renderSceneControls()
+})
+el<HTMLInputElement>('#scene-background').addEventListener('input', (event) => {
+  scene.background = (event.target as HTMLInputElement).value
+})
+el<HTMLTextAreaElement>('#scene-extra').addEventListener('input', (event) => {
+  scene.extra = (event.target as HTMLTextAreaElement).value
+})
+
+el('#scene-generate').addEventListener('click', async () => {
+  const runStart = scene.start
+  const model = scene.model
+  const background = scene.background
+  const extra = scene.extra
+  const groups = buildGroups(state.products, state.comboSize, state.mode, scene.count, runStart - 1)
+  if (!groups.length || scene.busy) return
+  if (groups.length > 1 && !window.confirm(`Generate ${groups.length} paid OpenAI scenes? This sends ${groups.length} image edit requests.`)) return
+  if (scene.results.length && !window.confirm('This replaces the AI scenes in this tab. Download or upload them first. Continue?')) return
+  scene.results.forEach((result) => { if (result.url) URL.revokeObjectURL(result.url) })
+  scene.results = []
+  scene.hostedUrls = []
+  scene.resultStart = runStart
+  scene.busy = true
+  scene.stop = false
+  renderSceneControls()
+  renderSceneResults()
+  const references = new Map<number, Promise<{ type: string; data: string }>>()
+  const usedNames = new Set<string>()
+  let errorMessage = ''
+  for (const [index, group] of groups.entries()) {
+    if (scene.stop) break
+    sayScene(`Generating scene ${index + 1} of ${groups.length}...`)
+    try {
+      const images = await Promise.all(group.map((product) => {
+        let reference = references.get(product.id)
+        if (!reference) {
+          reference = toReference(product.file)
+          references.set(product.id, reference)
+        }
+        return reference
+      }))
+      const generated = await generateScene({ model, background, extra, images })
+      const bytes = Uint8Array.from(atob(generated.data), (char) => char.charCodeAt(0))
+      const blob = new Blob([bytes], { type: generated.type })
+      scene.results.push({
+        name: `AI-${comboName(group.map((product) => product.file.name), 'jpg', usedNames)}`,
+        blob,
+        url: URL.createObjectURL(blob),
+        index: runStart + index,
+        sources: group.map((product) => product.file),
+      })
+      renderSceneResults()
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Could not generate this scene.'
+      break
+    }
+  }
+  scene.busy = false
+  renderSceneControls()
+  renderSceneResults()
+  sayScene(errorMessage || `${scene.results.length} AI scene${scene.results.length === 1 ? '' : 's'} ready. Review each product before listing.`, Boolean(errorMessage))
+})
+
+el('#scene-stop').addEventListener('click', () => {
+  scene.stop = true
+  sayScene('Stopping after the current image finishes...')
+})
+
+el('#scene-download-zip').addEventListener('click', async () => {
+  const entries: ZipEntry[] = []
+  for (const result of scene.results) entries.push({ name: result.name, data: new Uint8Array(await result.blob.arrayBuffer()) })
+  const url = URL.createObjectURL(createZip(entries))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `ai-scenes-${scene.resultStart}-${scene.resultStart + scene.results.length - 1}.zip`
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+})
+
+el('#scene-upload-r2').addEventListener('click', async () => {
+  if (!ai.r2?.configured || !scene.results.length) return
+  const button = el<HTMLButtonElement>('#scene-upload-r2')
+  button.disabled = true
+  sayScene(`Uploading ${scene.results.length} AI scenes to R2...`)
+  try {
+    const files = await Promise.all(scene.results.map(async (result) => ({ name: result.name, type: 'image/jpeg', data: await resultToBase64(result.blob) })))
+    const uploaded = await uploadProductImagesToR2(`AI scenes ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, files)
+    scene.hostedUrls = uploaded.results.flatMap((result) => result.url ? [result.url] : [])
+    const failed = uploaded.results.filter((result) => !result.url)
+    sayScene(failed.length ? `${scene.hostedUrls.length} uploaded, ${failed.length} failed: ${failed[0]?.error ?? 'Unknown error'}` : `${scene.hostedUrls.length} AI scene URLs ready.`, Boolean(failed.length))
+    renderSceneResults()
+  } catch (error) {
+    sayScene(error instanceof Error ? error.message : 'Could not upload AI scenes.', true)
+  } finally {
+    button.disabled = false
+  }
+})
+
+el('#scene-copy-urls').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(scene.hostedUrls.join('\n'))
+    sayScene(`${scene.hostedUrls.length} image URLs copied.`)
+  } catch {
+    sayScene('Could not copy image URLs in this browser.', true)
+  }
+})
 
 /**
  * A status line dedicated to this action, inside the Add products panel.
@@ -1416,10 +1817,12 @@ async function copyText(text: string, confirmMessage: string) {
 
 el('#get-product-urls').addEventListener('click', async () => {
   if (!state.products.length) return
-  if (!ai.cloudinary?.configured) {
-    sayProductUrls('Connect Cloudinary first — the panel is right below this one.', true)
+  if (!hasImageHost()) {
+    sayProductUrls('Connect Cloudflare R2 or Cloudinary first — the settings are below this panel.', true)
     return
   }
+  const useR2 = Boolean(ai.r2?.configured)
+  const hostName = imageHostName()
   const button = el<HTMLButtonElement>('#get-product-urls')
   button.disabled = true
   button.textContent = 'Uploading...'
@@ -1427,11 +1830,13 @@ el('#get-product-urls').addEventListener('click', async () => {
   // the wrong result when the response comes back.
   const batch = state.products.map((product) => ({ id: product.id, file: product.file }))
   const folder = `Product photos ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
-  sayProductUrls(`Uploading ${plural(batch.length, 'image')} to Cloudinary...`)
+  sayProductUrls(`Uploading ${plural(batch.length, 'image')} to ${hostName}...`)
   try {
-    const { results } = await uploadProductImages(
+    const files =
+      await Promise.all(batch.map(async ({ file }) => ({ name: file.name, type: file.type, data: await fileToBase64(file) })))
+    const { results } = await (useR2 ? uploadProductImagesToR2 : uploadProductImages)(
       folder,
-      await Promise.all(batch.map(async ({ file }) => ({ name: file.name, type: file.type, data: await fileToBase64(file) }))),
+      files,
     )
     let done = 0
     let failed = 0
@@ -1447,16 +1852,25 @@ el('#get-product-urls').addEventListener('click', async () => {
       }
     })
     renderProducts()
+    const errors = [...new Set(
+      results
+        .filter((result) => !result.url)
+        .map((result) => result.error?.trim() || `${hostName} returned no URL.`)
+        .map((message) => message.slice(0, 300)),
+    )]
+    const accountDisabled = !useR2 && errors.some((message) => /cloud_name is disabled/i.test(message))
     sayProductUrls(
       failed
-        ? `${done} of ${results.length} uploaded — ${failed} failed. Click the link icon on a row to copy its URL.`
+        ? `${done} of ${results.length} uploaded — ${failed} failed.${accountDisabled
+          ? ' Cloudinary says this account is disabled. Check account verification and status in Cloudinary; if it is active, verify the saved cloud name and credentials.'
+          : errors.length ? ` ${errors.slice(0, 3).join(' · ')}` : ''}`
         : `${done} image${done === 1 ? '' : 's'} uploaded. Click the link icon on a row, or "Copy all URLs", to grab the links.`,
       Boolean(failed && !done),
     )
   } catch (error) {
     sayProductUrls(error instanceof Error ? error.message : 'Could not upload those images.', true)
   } finally {
-    button.disabled = state.products.length === 0 || !ai.cloudinary?.configured
+    button.disabled = state.products.length === 0 || !hasImageHost()
     button.textContent = 'Get image URLs'
   }
 })
@@ -1509,7 +1923,7 @@ el('#download-zip').addEventListener('click', async () => {
   const url = URL.createObjectURL(createZip(entries))
   const link = document.createElement('a')
   link.href = url
-  link.download = `combos-${state.comboSize}up.zip`
+  link.download = `combos-${state.comboSize}up-lot-${resultLot}.zip`
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 })
@@ -1532,13 +1946,13 @@ const skuOf = (name: string) => name.slice(0, name.length - extensionOf(name).le
  * individual product shots after it, which is what fills the extra image slots
  * on a listing.
  */
-function comboFiles(result: Result): { sku: string; files: { name: string; source: Blob }[] } {
+function comboFiles(result: Result, layout = ai.canvasLayout): { sku: string; files: { name: string; source: Blob }[] } {
   const sku = skuOf(result.name)
-  if (ai.canvasLayout === 'flat') {
+  if (layout === 'flat') {
     return { sku, files: [{ name: result.name, source: result.blob }] }
   }
   const files = [{ name: `1${extensionOf(result.name)}`, source: result.blob as Blob }]
-  if (ai.canvasLayout === 'combo+sources') {
+  if (layout === 'combo+sources') {
     result.sources.forEach((file, index) => {
       files.push({ name: `${index + 2}${extensionOf(file.name)}`, source: file })
     })
@@ -1558,44 +1972,74 @@ function resultToBase64(blob: Blob): Promise<string> {
 
 /** Combos per request when uploading to Drive, to keep each body modest. */
 const DRIVE_BATCH = 25
+let canvasPauseRequested = false
+let canvasContinue: (() => void) | null = null
 
-el('#canvas-drive-upload').addEventListener('click', async () => {
+async function uploadCanvasResults(resume: boolean) {
   if (!results.length) return
   const toDrive = Boolean(ai.drive?.connected)
-  const toCloud = Boolean(ai.cloudinary?.configured)
+  const toCloud = hasImageHost()
   if (!toDrive && !toCloud) {
-    say('Connect Google Drive or Cloudinary first — both panels are under Add products.')
+    say('Connect Google Drive, Cloudflare R2 or Cloudinary first — the panels are under Add products.')
     return
   }
-  const folderName = `Canvas combos ${state.comboSize}-up ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
-  const perCombo = comboFiles(results[0]).files.length
-  const total = results.reduce((sum, result) => sum + comboFiles(result).files.length, 0)
-  const shape = ai.canvasLayout === 'flat'
+  const layout = ai.canvasLayout
+  const folderName = `Canvas combos ${state.comboSize}-up Lot ${resultLot} ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
+  const perCombo = comboFiles(results[0], layout).files.length
+  const total = results.reduce((sum, result) => sum + comboFiles(result, layout).files.length, 0)
+  const shape = layout === 'flat'
     ? 'as loose files'
     : `as ${results.length} SKU folders (${perCombo} image${perCombo === 1 ? '' : 's'} each)`
   // Naming the destination in the prompt, because with Drive disconnected the
   // images go somewhere else entirely and that should not be a surprise.
   const where = toDrive && toCloud
-    ? 'Google Drive (shared publicly so Flipkart can read them) and Cloudinary'
+    ? `Google Drive (shared publicly so Flipkart can read them) and ${imageHostName()}`
     : toDrive
       ? 'Google Drive, shared publicly so Flipkart can read them'
-      : `Cloudinary (${ai.cloudinary?.cloudName})`
-  const thin = ai.canvasLayout === 'combo'
+      : imageHostName()
+  const thin = layout === 'combo'
     ? '\n\nNote: "Combo only" uploads just the combo image, so the listing sheet will have a hero URL and no Image 2/3/4 columns. Pick "Combo + source photos" if you want those.'
     : ''
-  if (!window.confirm(`Upload ${total} images to ${where}?\n\nFolder: "${folderName}"\nThey go up ${shape}.${thin}`)) return
+  const confirmation = resume
+    ? `Continue the previous upload to ${where}? Already completed SKUs will be skipped.\n\nUse the same generated lot and upload layout.`
+    : `Upload ${total} images to ${where}?\n\nFolder: "${folderName}"\nThey go up ${shape}.${thin}`
+  if (!window.confirm(confirmation)) return
 
   ai.driveBusy = true
+  canvasPauseRequested = false
   renderDrive()
   try {
-    await startDriveImages(folderName, ai.canvasLayout)
+    const completed = resume
+      ? new Set((await resumeDriveImages(layout, results.map((result) => ({ sku: skuOf(result.name), count: comboFiles(result, layout).files.length })))).completed)
+      : (await startDriveImages(folderName, layout), new Set<string>())
+    await refreshDrive()
+    const remaining = results.filter((result) => !completed.has(skuOf(result.name)))
+    const uploadCancelled = () => ai.drive?.run?.status === 'cancelled'
+    const waitIfPaused = async () => {
+      if (!canvasPauseRequested || uploadCancelled()) return
+      if (ai.drive?.run?.status === 'running') {
+        await pauseDriveImages()
+        await refreshDrive()
+      }
+      if (!canvasPauseRequested) {
+        if (ai.drive?.run?.status === 'paused') {
+          await resumeDriveImages(layout, results.map((result) => ({ sku: skuOf(result.name), count: comboFiles(result, layout).files.length })))
+          await refreshDrive()
+        }
+        return
+      }
+      say(`Paused after ${ai.drive?.run?.done ?? 0} images. Click Continue upload to resume.`)
+      await new Promise<void>((resolve) => { canvasContinue = resolve })
+      canvasContinue = null
+    }
     // Sent in batches: a few hundred combos with their source photos is far
     // more than one request can carry.
-    for (let start = 0; start < results.length; start += DRIVE_BATCH) {
-      if (ai.drive?.run?.status === 'cancelled') break
+    for (let start = 0; start < remaining.length; start += DRIVE_BATCH) {
+      await waitIfPaused()
+      if (uploadCancelled()) break
       const groups: DriveGroup[] = []
-      for (const result of results.slice(start, start + DRIVE_BATCH)) {
-        const { sku, files } = comboFiles(result)
+      for (const result of remaining.slice(start, start + DRIVE_BATCH)) {
+        const { sku, files } = comboFiles(result, layout)
         groups.push({
           sku,
           files: await Promise.all(
@@ -1607,17 +2051,49 @@ el('#canvas-drive-upload').addEventListener('click', async () => {
           ),
         })
       }
+      await waitIfPaused()
+      if (uploadCancelled()) break
       await sendDriveImages(groups)
       await refreshDrive()
     }
-    await finishDriveImages()
-    await refreshDrive()
-    say(`Uploaded to ${toDrive ? 'Drive' : 'Cloudinary'}. The listing sheet is ready to download.`)
+    if (ai.drive?.run?.status === 'running') {
+      await finishDriveImages()
+      await refreshDrive()
+      say(`Uploaded to ${toDrive ? 'Drive' : imageHostName()}. The listing sheet is ready to download.`)
+    } else if (ai.drive?.run?.status === 'cancelled') {
+      say('Upload stopped. Completed images remain available; generate the same lot and click Continue upload for the rest.')
+    }
   } catch (error) {
     say(error instanceof Error ? error.message : 'Could not finish that upload.', true)
   } finally {
     ai.driveBusy = false
+    canvasPauseRequested = false
+    canvasContinue = null
     renderDrive()
+  }
+}
+
+el('#canvas-drive-upload').addEventListener('click', () => { void uploadCanvasResults(false) })
+el('#canvas-drive-pause').addEventListener('click', () => {
+  canvasPauseRequested = true
+  renderDrive()
+  say('Pausing after the current batch...')
+})
+el('#canvas-drive-continue').addEventListener('click', async () => {
+  if (ai.driveBusy) {
+    try {
+      if (ai.drive?.run?.status === 'paused') {
+        await resumeDriveImages(ai.canvasLayout, results.map((result) => ({ sku: skuOf(result.name), count: comboFiles(result).files.length })))
+        await refreshDrive()
+      }
+      canvasPauseRequested = false
+      canvasContinue?.()
+      renderDrive()
+    } catch (error) {
+      say(error instanceof Error ? error.message : 'Could not continue the upload.', true)
+    }
+  } else {
+    void uploadCanvasResults(true)
   }
 })
 
@@ -1845,18 +2321,19 @@ function renderDrive() {
 
   const run = status?.run
   const running = run?.status === 'running'
+  const paused = run?.status === 'paused'
   const button = el<HTMLButtonElement>('#drive-upload')
-  button.disabled = ai.driveBusy || running
+  button.disabled = ai.driveBusy || running || paused
   button.textContent = running ? 'Uploading...' : 'Create folder & upload'
   el('#drive-open').classList.toggle('hidden', !run?.link)
-  el('#drive-stop').classList.toggle('hidden', !running)
+  el('#drive-stop').classList.toggle('hidden', !running && !paused)
 
   // A Cloudinary failure is not fatal to the upload, so it would otherwise pass
   // unnoticed — but it decides whether the sheet carries durable URLs or falls
   // back to Drive ones, which is exactly what the user needs to know before
   // pasting several hundred links into a listing.
   const mirrorNote = () => {
-    if (!run || !ai.cloudinary?.configured) return ''
+    if (!run || !hasImageHost()) return ''
     const uploaded = run.done + run.skipped
     if (run.hostError) return ` Durable URLs: ${run.hosted ?? 0} of ${uploaded} — ${run.hostError}`
     return run.hosted ? ` ${run.hosted} durable URLs.` : ''
@@ -1873,16 +2350,24 @@ function renderDrive() {
 
   // The canvas tab's own controls and status line, driven by the same run state.
   const canvasButton = el<HTMLButtonElement>('#canvas-drive-upload')
-  const hosting = Boolean(ai.cloudinary?.configured)
-  canvasButton.disabled = ai.driveBusy || running || !results.length || (!connected && !hosting)
-  canvasButton.textContent = connected ? 'Save to Drive' : hosting ? 'Upload to Cloudinary' : 'Save to Drive'
+  const hosting = hasImageHost()
+  canvasButton.disabled = busy || ai.driveBusy || running || paused || !results.length || (!connected && !hosting)
+  canvasButton.textContent = connected ? 'Save to Drive' : hosting ? `Upload to ${ai.r2?.configured ? 'R2' : 'Cloudinary'}` : 'Save to Drive'
   canvasButton.title = connected || hosting
     ? ''
-    : 'Connect Google Drive or Cloudinary in the Add products panel first.'
-  canvasButton.classList.toggle('hidden', running)
-  el('#canvas-drive-stop').classList.toggle('hidden', !running)
+    : 'Connect Google Drive, Cloudflare R2 or Cloudinary in the Add products panel first.'
+  canvasButton.classList.toggle('hidden', running || paused)
+  const resumable = Boolean(run && ['paused', 'cancelled', 'failed'].includes(run.status) && run.manifest?.length && results.length)
+  const pauseButton = el<HTMLButtonElement>('#canvas-drive-pause')
+  pauseButton.classList.toggle('hidden', !running || !ai.driveBusy)
+  pauseButton.disabled = canvasPauseRequested
+  pauseButton.textContent = canvasPauseRequested ? 'Pausing...' : 'Pause after batch'
+  const continueButton = el<HTMLButtonElement>('#canvas-drive-continue')
+  continueButton.classList.toggle('hidden', !(paused || resumable))
+  continueButton.disabled = !results.length || (!ai.driveBusy && !resumable)
+  el('#canvas-drive-stop').classList.toggle('hidden', !running && !paused)
   el('#canvas-layout-options').innerHTML = LAYOUTS_OUT
-    .map((option) => `<button class="chip ${option.id === ai.canvasLayout ? 'selected' : ''}" data-canvas-layout="${option.id}" title="${escapeHtml(option.hint)}">${option.label}</button>`)
+    .map((option) => `<button class="chip ${option.id === ai.canvasLayout ? 'selected' : ''}" data-canvas-layout="${option.id}" title="${escapeHtml(option.hint)}" ${ai.driveBusy ? 'disabled' : ''}>${option.label}</button>`)
     .join('')
   // The sheet is built from a finished upload's manifest, so it cannot exist
   // before one has run. Shown disabled rather than hidden: a button that
@@ -1899,6 +2384,57 @@ function renderDrive() {
   }
   el('#canvas-drive-copy').textContent = results.length ? runLine('') : ''
 }
+
+function renderUploadTasks() {
+  const select = el<HTMLSelectElement>('#upload-task-select')
+  const tasks = ai.uploadTasks
+  if (!tasks.some((task) => task.id === ai.selectedUploadTask)) {
+    ai.selectedUploadTask = tasks.find((task) => task.current)?.id ?? tasks[0]?.id ?? ''
+  }
+  select.innerHTML = tasks.length
+    ? tasks.map((task) => `<option value="${task.id}" ${task.id === ai.selectedUploadTask ? 'selected' : ''}>${escapeHtml(task.folder)} · ${task.done} uploaded · ${task.status}${task.current ? ' (current)' : ''}</option>`).join('')
+    : '<option value="">No saved upload tasks</option>'
+  const selected = tasks.find((task) => task.id === ai.selectedUploadTask)
+  const active = selected?.status === 'running' || (selected?.current && ai.drive?.run?.status === 'paused')
+  el<HTMLButtonElement>('#upload-task-reset').disabled = !selected || Boolean(active) || ai.driveBusy
+  el<HTMLButtonElement>('#upload-task-reset').title = active ? 'Finish or stop this upload before resetting it.' : ''
+}
+
+async function refreshUploadTasks() {
+  if (STATIC_HOST) return
+  try {
+    ai.uploadTasks = (await listUploadTasks()).tasks
+  } catch {
+    ai.uploadTasks = []
+  }
+  renderUploadTasks()
+}
+
+el<HTMLSelectElement>('#upload-task-select').addEventListener('change', (event) => {
+  ai.selectedUploadTask = (event.target as HTMLSelectElement).value
+  renderUploadTasks()
+})
+
+el('#upload-task-reset').addEventListener('click', async () => {
+  const task = ai.uploadTasks.find((item) => item.id === ai.selectedUploadTask)
+  if (!task) return
+  const message = el('#upload-task-message')
+  if (!window.confirm(`Reset saved upload progress for "${task.folder}"?\n\nIts local URL sheet and resume data will be removed. Already uploaded images stay online. Saved templates and alignments will not change.`)) return
+  const button = el<HTMLButtonElement>('#upload-task-reset')
+  button.disabled = true
+  try {
+    ai.uploadTasks = (await resetUploadTask(task.id)).tasks
+    ai.selectedUploadTask = ''
+    await refreshDrive()
+    renderUploadTasks()
+    message.textContent = `Reset "${task.folder}". Its uploaded images remain online.`
+    message.classList.remove('hidden')
+  } catch (error) {
+    message.textContent = error instanceof Error ? error.message : 'Could not reset the selected task.'
+    message.classList.remove('hidden')
+    renderUploadTasks()
+  }
+})
 
 function renderReverse() {
   const describe = ai.config?.describe
@@ -2101,12 +2637,15 @@ let drivePoll: ReturnType<typeof setTimeout> | null = null
  */
 async function refreshDrive() {
   if (STATIC_HOST) return
+  const previous = `${ai.drive?.run?.id ?? ''}:${ai.drive?.run?.status ?? ''}`
   try {
     ai.drive = await driveStatus()
   } catch {
     ai.drive = null
   }
   renderDrive()
+  renderUploadTasks()
+  if (previous !== `${ai.drive?.run?.id ?? ''}:${ai.drive?.run?.status ?? ''}`) void refreshUploadTasks()
   if (drivePoll) clearTimeout(drivePoll)
   if (ai.drive?.run?.status === 'running') {
     drivePoll = setTimeout(refreshDrive, 1500)
@@ -2131,6 +2670,155 @@ async function refreshCloudinary() {
   renderDrive()
   renderProducts()
 }
+
+async function refreshR2() {
+  try {
+    ai.r2 = await r2Status()
+  } catch {
+    ai.r2 = null
+  }
+  renderR2()
+  renderDrive()
+  renderProducts()
+  renderSceneResults()
+}
+
+function renderR2() {
+  const configured = Boolean(ai.r2?.configured)
+  el('#r2-connect').classList.toggle('hidden', configured)
+  el('#r2-connected-row').classList.toggle('hidden', !configured)
+  el('#r2-archive').classList.toggle('hidden', !configured)
+  el<HTMLButtonElement>('#r2-archive-upload').disabled = r2ZipBusy || !configured || !el<HTMLInputElement>('#r2-archive-file').files?.length
+  if (configured) {
+    el('#r2-name').textContent = `R2 settings saved — ${ai.r2?.bucket} (key ${ai.r2?.accessKeyHint ?? ''})`
+  }
+}
+
+let r2ZipBusy = false
+let r2ZipResults: NonNullable<R2ZipImport['results']> = []
+
+function csvField(value: string) { return `"${value.replaceAll('"', '""')}"` }
+
+async function trackR2Zip(id: string) {
+  r2ZipBusy = true
+  renderR2()
+  for (;;) {
+    try {
+      const job = await r2ZipImportStatus(id)
+      sayR2Archive(`${job.name}: ${job.done} uploaded, ${job.failed} failed of ${job.total} images.${job.status === 'running' ? ' Importing...' : ''}`, job.status === 'failed' || job.failed > 0)
+      if (job.status !== 'running') {
+        r2ZipResults = job.results ?? []
+        el('#r2-archive-result').classList.toggle('hidden', !r2ZipResults.length)
+        if (job.error) sayR2Archive(`${job.error} ${job.done} images uploaded before the import stopped.`, true)
+        break
+      }
+    } catch (error) {
+      sayR2Archive(error instanceof Error ? error.message : 'Could not read import progress.', true)
+      localStorage.removeItem('r2-zip-import-id')
+      break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  }
+  r2ZipBusy = false
+  renderR2()
+  void refreshUploadTasks()
+}
+
+function sayR2Archive(message: string, error = false) {
+  const line = el('#r2-archive-status')
+  line.className = error ? 'hint error' : 'hint'
+  line.textContent = message
+  line.classList.remove('hidden')
+}
+
+el('#r2-archive-file').addEventListener('change', () => {
+  renderR2()
+})
+
+el('#r2-archive-upload').addEventListener('click', async () => {
+  const file = el<HTMLInputElement>('#r2-archive-file').files?.[0]
+  if (!file) return
+  if (!/\.zip$/i.test(file.name)) return sayR2Archive('Choose a .zip file.', true)
+  if (file.size > 2 * 1024 * 1024 * 1024) return sayR2Archive('Choose a ZIP smaller than 2 GB.', true)
+  const button = el<HTMLButtonElement>('#r2-archive-upload')
+  button.disabled = true
+  el('#r2-archive-result').classList.add('hidden')
+  sayR2Archive(`Reading ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)...`)
+  try {
+    const started = await uploadZipToR2(file)
+    localStorage.setItem('r2-zip-import-id', started.id)
+    void refreshUploadTasks()
+    void trackR2Zip(started.id)
+  } catch (error) {
+    sayR2Archive(error instanceof Error ? error.message : 'Could not read the ZIP.', true)
+    button.disabled = false
+  }
+})
+
+el('#r2-archive-download').addEventListener('click', () => {
+  if (!r2ZipResults.length) return
+  const csv = ['Image name,Public URL,Error', ...r2ZipResults.map((item) =>
+    [item.name, item.url ?? '', item.error ?? ''].map(csvField).join(','))].join('\r\n')
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'r2-image-urls.csv'
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+})
+
+el('#r2-archive-copy').addEventListener('click', async () => {
+  const urls = r2ZipResults.flatMap((item) => item.url ? [item.url] : [])
+  try {
+    await navigator.clipboard.writeText(urls.join('\n'))
+    sayR2Archive(`${urls.length} image URLs copied.`)
+  } catch {
+    sayR2Archive('Could not copy automatically; download the CSV instead.', true)
+  }
+})
+
+function sayR2(text: string, error = false) {
+  const line = el('#r2-status')
+  line.className = error ? 'hint error' : 'hint'
+  line.textContent = text
+  line.classList.remove('hidden')
+}
+
+el('#r2-save').addEventListener('click', async () => {
+  const button = el<HTMLButtonElement>('#r2-save')
+  button.disabled = true
+  sayR2('Saving R2 settings locally...')
+  try {
+    ai.r2 = await saveR2({
+      accountId: el<HTMLInputElement>('#r2-account-id').value.trim(),
+      bucket: el<HTMLInputElement>('#r2-bucket').value.trim(),
+      accessKeyId: el<HTMLInputElement>('#r2-access-key').value.trim(),
+      secretAccessKey: el<HTMLInputElement>('#r2-secret-key').value,
+      publicUrl: el<HTMLInputElement>('#r2-public-url').value.trim(),
+    })
+    el<HTMLInputElement>('#r2-secret-key').value = ''
+    renderR2()
+    renderDrive()
+    renderProducts()
+    sayR2('R2 settings saved. Use “Get image URLs” to verify bucket access and the public URL with your selected product photos.')
+  } catch (error) {
+    sayR2(error instanceof Error ? error.message : 'Could not save the R2 settings.', true)
+  } finally {
+    button.disabled = false
+  }
+})
+
+el('#r2-disconnect').addEventListener('click', async () => {
+  try {
+    ai.r2 = await disconnectR2()
+  } catch {
+    ai.r2 = null
+  }
+  renderR2()
+  renderDrive()
+  renderProducts()
+  sayR2('R2 settings removed from the local launcher.')
+})
 
 function renderCloudinary() {
   const status = ai.cloudinary
@@ -2290,6 +2978,8 @@ el('#drive-stop').addEventListener('click', async () => {
   try {
     await cancelDriveUpload()
     await refreshDrive()
+    canvasPauseRequested = false
+    canvasContinue?.()
     say('Upload stopped. What was already uploaded stays in Drive.')
   } catch (error) {
     say(error instanceof Error ? error.message : 'Could not stop the upload.', true)
@@ -2307,6 +2997,8 @@ el('#canvas-drive-stop').addEventListener('click', async () => {
   try {
     await cancelDriveUpload()
     await refreshDrive()
+    canvasPauseRequested = false
+    canvasContinue?.()
     say('Upload stopped. What was already uploaded stays in Drive.')
   } catch (error) {
     say(error instanceof Error ? error.message : 'Could not stop the upload.', true)
@@ -2899,7 +3591,12 @@ refresh()
 if (!STATIC_HOST) {
   void refreshTemplates()
   void refreshDrive()
+  void refreshUploadTasks()
   void refreshCloudinary()
+  void refreshR2()
+  void refreshSceneStatus()
+  const pendingZip = localStorage.getItem('r2-zip-import-id')
+  if (pendingZip) void trackR2Zip(pendingZip)
 }
 
 // The extension can put one image on a different surface, and can have a model
