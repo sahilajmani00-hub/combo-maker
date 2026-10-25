@@ -33,6 +33,7 @@ import * as cloudinary from './cloudinary.mjs'
 import * as cloudflareR2 from './cloudflare-r2.mjs'
 import * as openaiScene from './openai-scene.mjs'
 import { listImages, extractImage } from './zip-images.mjs'
+import { handleBusiness } from '../business/server.mjs'
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const dist = join(root, 'dist')
@@ -1862,6 +1863,7 @@ function serveFile(response, filePath) {
 const server = createServer(async (request, response) => {
   try {
     const pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname)
+    if (await handleBusiness(request, response, pathname, dist, join(root, 'extension'))) return
     if (await handleApi(request, response, pathname)) return
 
     const target = normalize(join(dist, pathname === '/' ? 'index.html' : pathname))

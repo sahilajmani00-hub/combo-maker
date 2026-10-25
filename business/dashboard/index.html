@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Combo Workspace · Your business tools</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+  <script src="/dashboard/app.js" defer></script>
+  <script src="/dashboard/home.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="#overview"><span class="brandmark">c<span>+</span></span><span>Combo<span class="brand-sub">WORKSPACE</span></span></a>
+    <label class="search"><span aria-hidden="true">⌕</span><input id="tool-search" type="search" placeholder="Find a tool…" aria-label="Find a tool"><kbd>/</kbd></label>
+    <nav id="navigation" aria-label="Tools"></nav>
+    <div class="sidebar-foot"><span class="status-dot" id="status-dot"></span><div><b id="server-status">Checking tools…</b><small>Local workspace</small></div><button id="check-status" title="Check connection" aria-label="Check connection">↻</button></div>
+  </aside>
+  <button class="menu-backdrop" id="menu-backdrop" aria-label="Close tools menu" tabindex="-1"></button>
+  <div class="main">
+    <header class="topbar"><div class="breadcrumb"><button id="menu" aria-expanded="false" aria-controls="sidebar" aria-label="Toggle tools menu">☰</button><span>Workspace</span><span class="slash">/</span><strong id="breadcrumb">Overview</strong></div><a class="github-link" href="https://github.com/sahilajmani00-hub/combo-maker" target="_blank" rel="noopener">Combo Maker on GitHub ↗</a></header>
+    <main>
+      <section id="overview" class="overview">
+        <div class="welcome"><div><div class="eyebrow" id="today-date">TODAY</div><h1>Your daily checklist.</h1><p>Keep orders, payments and stock up to date.</p></div><button class="secondary" id="refresh-tasks">Refresh</button></div>
+        <div id="daily-summary" class="daily-summary" role="status"></div>
+        <div id="daily-alert" role="status"></div>
+        <div id="daily-tasks"></div>
+        <details class="daily-settings"><summary>Choose daily reminders · On / Off</summary><p>Turn off tasks you do not need. Your selections are saved in this browser.</p><div id="daily-toggles"></div></details>
+        <details class="daily-settings"><summary>Recent completion history</summary><div id="daily-history"></div></details>
+        <p class="daily-note">Tick a task after reviewing it. Completion is saved for today; tomorrow starts a fresh checklist. Business tools are in the sidebar.</p>
+        <div hidden><span id="tool-count"></span><div id="tool-grid"></div><p id="no-tools"></p></div>
+      </section>
+      <section id="workspace" class="workspace" hidden>
+        <div class="workspace-heading"><div><span class="eyebrow" id="tool-category"></span><h1 id="tool-title"></h1><p id="tool-description"></p></div><a id="standalone" class="secondary" target="_blank" rel="noopener">Open separately ↗</a></div>
+        <div class="loading" id="loading" role="status">Opening your tool…</div>
+        <div class="tool-error" id="tool-error" hidden><h2>This tool couldn’t open.</h2><p id="error-detail">Check that Combo Maker is running, then retry.</p><button id="retry" class="primary">Retry</button></div>
+        <div class="frames" id="frames"></div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

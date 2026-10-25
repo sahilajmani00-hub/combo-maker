@@ -1,0 +1,4 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {resolveComponents,pricingRow} from '../business/sku-pricing.mjs';
+const products=[{id:'a',n:'Bow',a:['Red Bow']},{id:'b',n:'Pearl',a:[]}];
+test('resolver fully covers tokens and preserves repeats',()=>{assert.deepEqual(resolveComponents('Red_Bow&Bow&Pearl',products).components,[0,0,1]);assert.equal(resolveComponents('BowUnknown',products).complete,false);assert.equal(resolveComponents('Bow2',products).complete,false);assert.equal(resolveComponents('123_456',products).complete,false)});
+test('missing costs suppress totals; net target uses margin, not markup',()=>{assert.equal(pricingRow({sku:'Bow&Pearl'},products,[10,0],6,25).target,null);const r=pricingRow({sku:'Bow&Pearl'},products,[10,14],6,25);assert.equal(r.cost,30);assert.equal(r.target,40)});

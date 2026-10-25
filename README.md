@@ -1,5 +1,16 @@
 # Combo Maker
 
+## One local workspace
+
+Run `npm start` and open **http://localhost:4173/**. This is now the combined
+workspace for combo images, SKU pricing, stock imports, customer returns,
+inventory movements, and Meesho payout analysis. The standalone combo editor
+remains available at `/combo/` within the same server. The separate dashboard
+on port 8000 is no longer needed. Local inventory entries are saved in
+`data/operations.json`; export them from the Inventory & returns page for a
+portable copy. Pricing edits saved in a browser under the old port 8000 are
+separate browser storage and should be exported or re-entered on port 4173.
+
 Local browser tool for turning individual product photos into 2 / 3 / 4-product combo
 images. It has two sections:
 
